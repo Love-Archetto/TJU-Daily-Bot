@@ -1,15 +1,17 @@
 main_models:
+  # TJU 开源大模型平台（OpenAI 兼容协议）— 已验证可用（vLLM 服务 qwen3.6-35b）
+  - model_name: "tju-llm"
+    api_base: "https://ai.tju.edu.cn/api/v3"
+    api_key_env: "TJU_API_KEY"
   - model_name: "deepseek-chat"
     api_base: "https://api.deepseek.com/v1"
     api_key_env: "DEEPSEEK_API_KEY"
   - model_name: "gpt-4o-mini"
     api_base: "https://api.openai.com/v1"
     api_key_env: "OPENAI_API_KEY"
-  - model_name: "qwen-max"
-    api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    api_key_env: "QWEN_API_KEY"
 
 checker:
-  model_name: "gpt-4o-mini"
-  api_base: "https://api.openai.com/v1"
-  api_key_env: "OPENAI_API_KEY"
+  # TJU 模型用于报告检查（免费可用）
+  model_name: "tju-llm"
+  api_base: "https://ai.tju.edu.cn/api/v3"
+  api_key_env: "TJU_API_KEY"

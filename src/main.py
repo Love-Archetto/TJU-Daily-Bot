@@ -23,6 +23,10 @@ import yaml
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# 加载 .env（GitHub Actions 用 env: 注入，本地用 .env）
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
+
 from src.crawler.web_crawler import fetch_articles_from_list_page
 from src.crawler.mp_wechat_crawler import fetch_all_wechat
 from src.ai_engine.fault_tolerant_client import FaultTolerantClient
