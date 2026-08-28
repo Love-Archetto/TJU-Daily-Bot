@@ -1,0 +1,17 @@
+version: '3.8'
+services:
+  we-mp-rss:
+    image: rachelos/we-mp-rss:latest
+    container_name: wechat-rss
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./wechat-rss-data:/app/data
+    environment:
+      - WEREAD_COOKIE=${WEREAD_COOKIE}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

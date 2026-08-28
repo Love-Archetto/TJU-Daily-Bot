@@ -1,0 +1,15 @@
+main_models:
+  - model_name: "deepseek-chat"
+    api_base: "https://api.deepseek.com/v1"
+    api_key_env: "DEEPSEEK_API_KEY"
+  - model_name: "gpt-4o-mini"
+    api_base: "https://api.openai.com/v1"
+    api_key_env: "OPENAI_API_KEY"
+  - model_name: "qwen-max"
+    api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    api_key_env: "QWEN_API_KEY"
+
+checker:
+  model_name: "gpt-4o-mini"
+  api_base: "https://api.openai.com/v1"
+  api_key_env: "OPENAI_API_KEY"

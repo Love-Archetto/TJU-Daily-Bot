@@ -1,0 +1,112 @@
+prefer_function_calling: true
+
+model:
+  model_name: "deepseek-chat"
+  api_base: "https://api.deepseek.com/v1"
+  api_key_env: "DEEPSEEK_API_KEY"
+
+system_prompt: |
+  你是一个帮助天津大学学生管理日常信息的助手。你可以调用工具完成操作，请根据用户意图选择合适的工具。
+  调用工具时，请严格按照以下 JSON 格式返回（不要添加任何额外文字）：
+  {"tool": "工具名称", "args": {"参数名": "参数值"}}
+
+  可用工具列表：
+  - read_file: 读取配置文件或报告
+  - write_file: 写入配置文件（仅限 config/ 目录）
+  - append_keyword: 添加关键词到 keywords.txt
+  - update_profile: 更新用户画像（degree/college/major）
+  - list_outputs: 列出所有报告
+  - open_report: 打开指定报告
+  - search: 在已抓取内容中搜索
+  - git_commit_only: 仅提交不推送
+  - git_commit_push: 提交并推送
+
+temperature: 0.3
+max_tokens: 800
+max_history_turns: 10
+history_dir: "history"
+max_history_files: 30
+
+tools_schema:
+  - type: "function"
+    function:
+      name: "read_file"
+      description: "读取文件内容"
+      parameters:
+        type: "object"
+        properties:
+          path: {"type": "string", "description": "文件路径"}
+        required: ["path"]
+  - type: "function"
+    function:
+      name: "write_file"
+      description: "写入配置文件（仅限 config/ 目录）"
+      parameters:
+        type: "object"
+        properties:
+          path: {"type": "string", "description": "目标路径"}
+          content: {"type": "string", "description": "文件内容"}
+        required: ["path", "content"]
+  - type: "function"
+    function:
+      name: "append_keyword"
+      description: "追加关键词到 keywords.txt"
+      parameters:
+        type: "object"
+        properties:
+          word: {"type": "string", "description": "要添加的关键词"}
+        required: ["word"]
+  - type: "function"
+    function:
+      name: "update_profile"
+      description: "更新用户画像"
+      parameters:
+        type: "object"
+        properties:
+          field: {"type": "string", "enum": ["degree", "college", "major"]}
+          value: {"type": "string"}
+        required: ["field", "value"]
+  - type: "function"
+    function:
+      name: "list_outputs"
+      description: "列出所有报告"
+      parameters:
+        type: "object"
+        properties: {}
+  - type: "function"
+    function:
+      name: "open_report"
+      description: "打开指定报告"
+      parameters:
+        type: "object"
+        properties:
+          filename: {"type": "string", "description": "报告文件名"}
+        required: ["filename"]
+  - type: "function"
+    function:
+      name: "search"
+      description: "搜索已抓取内容"
+      parameters:
+        type: "object"
+        properties:
+          query: {"type": "string", "description": "搜索关键词"}
+          source: {"type": "string", "description": "限定信源名称"}
+        required: ["query"]
+  - type: "function"
+    function:
+      name: "git_commit_only"
+      description: "仅提交不推送"
+      parameters:
+        type: "object"
+        properties:
+          message: {"type": "string"}
+        required: ["message"]
+  - type: "function"
+    function:
+      name: "git_commit_push"
+      description: "提交并推送"
+      parameters:
+        type: "object"
+        properties:
+          message: {"type": "string"}
+        required: ["message"]

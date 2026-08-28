@@ -1,0 +1,11 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+history/
+playwright-browsers/
+search_index.db
+wechat-rss-data/
+.omc/
+.claude/
+*.bak

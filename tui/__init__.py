@@ -1,0 +1,1 @@
+"""TUI 模块 — Textual 界面、Agent 引擎、工具层、Git 封装、搜索索引."""

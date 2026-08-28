@@ -1,0 +1,41 @@
+name: TJU Daily Bot
+on:
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - run: pip install -r requirements.txt
+      - run: python src/main.py
+        env:
+          CI: true
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+          # 微信公众号抓取（纯远程 MP API 方案）
+          WEREAD_COOKIE: ${{ secrets.WEREAD_COOKIE }}
+          MP_QUERY_TOKEN: ${{ secrets.MP_QUERY_TOKEN }}
+          # 每个公众号抓取间隔秒数（微信频控严格建议 ≥6，可选）
+          MP_DELAY_SECONDS: ${{ secrets.MP_DELAY_SECONDS || 6 }}
+          # 邮件告警（Cookie 过期时通知）
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_TLS: ${{ secrets.SMTP_TLS }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          NOTIFY_TO: ${{ secrets.NOTIFY_TO }}
+      - name: Push output/ and state.json
+        run: |
+          git config user.name "TJU Bot"
+          git config user.email "bot@tju.edu"
+          git add output/ state.json
+          git commit -m "data: daily report $(date +%Y-%m-%d)" || echo "No changes"
+          git pull --rebase origin main || echo "Conflict, skip push"
+          git push origin main || echo "Push failed, check manually"
