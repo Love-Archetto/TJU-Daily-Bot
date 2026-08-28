@@ -49,6 +49,27 @@ MP_STATUS = {
 RATE_LIMIT_RET = {200013}
 
 
+def _sanitize_cookie(cookie: str) -> str:
+    """清理 Cookie，去除可能导致 requests header 报错的非法字符。
+
+    根因：GitHub Actions 的 Secret 若粘贴时带入换行/多余空白，requests 会抛
+    "Invalid leading whitespace, reserved character(s) or return character(s) in header value"。
+    这里去除 \r \n 及首尾空白，并把连续空白折叠为单个空格，保证 header 合法。
+    """
+    if not cookie:
+        return ""
+    if "\r" in cookie or "\n" in cookie:
+        logger.warning(
+            "WEREAD_COOKIE 含换行符（可能来自 Secret 粘贴），已自动清理。"
+            "建议在 GitHub 里重新粘贴为单行以获最佳稳定性。"
+        )
+    # 去所有控制字符（\r \n \t 等）
+    cleaned = "".join(ch for ch in cookie if ch >= " " and ch != "\x7f")
+    # 折叠连续空白为单空格，再去首尾空格
+    cleaned = " ".join(cleaned.split())
+    return cleaned
+
+
 def is_ci_environment() -> bool:
     """检测是否在 GitHub Actions 环境."""
     return os.environ.get("CI", "").lower() == "true"
@@ -98,7 +119,7 @@ def _fetch_via_mp_api(fakeid: str, cookie: str, token: str, count: int = 5) -> t
     }
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Cookie": cookie,
+        "Cookie": _sanitize_cookie(cookie),
         "Referer": "https://mp.weixin.qq.com/",
     }
     try:
@@ -254,6 +275,10 @@ def fetch_all_wechat(
             delay_seconds = float(os.environ.get("MP_DELAY_SECONDS", str(DEF_DELAY_SECONDS)))
         except ValueError:
             delay_seconds = DEF_DELAY_SECONDS
+
+    # 清理 Cookie/Token（避免 Secret 带入换行/空白导致 header 非法）
+    cookie = _sanitize_cookie(cookie or "")
+    token = (token or "").strip()
 
     sources = load_wechat_sources()
     gzh_with_fakeid = [s for s in sources if _extract_fakeid(s)]
