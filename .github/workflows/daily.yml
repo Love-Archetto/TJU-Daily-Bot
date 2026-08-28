@@ -35,9 +35,17 @@ jobs:
           NOTIFY_TO: ${{ secrets.NOTIFY_TO }}
       - name: Push output/ and state.json
         run: |
+          set +e
           git config user.name "TJU Bot"
           git config user.email "bot@tju.edu"
-          git add output/ state.json
-          git commit -m "data: daily report $(date +%Y-%m-%d)" || echo "No changes"
-          git pull --rebase origin main || echo "Conflict, skip push"
-          git push origin main || echo "Push failed, check manually"
+          # 兼容 output/ 或 state.json 尚未生成的首次运行
+          mkdir -p output
+          [ -f state.json ] || echo '{}' > state.json
+          git add output/ state.json 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -m "data: daily report $(date +%Y-%m-%d)" || echo "No changes to commit"
+            git pull --rebase origin main || echo "Conflict, skip push"
+            git push origin main || echo "Push failed, check manually"
+          else
+            echo "No changes to commit"
+          fi
