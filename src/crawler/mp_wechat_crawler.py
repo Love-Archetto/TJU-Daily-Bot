@@ -66,11 +66,15 @@ def load_wechat_sources() -> list[dict[str, Any]]:
 
 
 def _extract_fakeid(s) -> str:
-    """从条目中稳健提取 fakeid（兼容带 = 的完整 URL 参数的情况）. """
+    """从条目中稳健提取 fakeid.
+
+    兼容两种存储形式：
+    - 纯 fakeid（base64，如 MjM5NzkwNzU0Mg==，尾部 = 是合法字符，勿裁）
+    - 完整参数形式（biz=MjM5...）
+    """
     fakeid = s.get("fakeid", "") or ""
-    # 取 = 后部分（若 fakeid 存成完整 biz=XXX 参数形式）
-    if "=" in fakeid:
-        fakeid = fakeid.split("=")[-1]
+    if fakeid.startswith("biz="):
+        fakeid = fakeid[len("biz="):]
     return fakeid.strip()
 
 
