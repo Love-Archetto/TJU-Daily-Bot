@@ -18,21 +18,7 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      # 诊断 TJU API 在云端的连通性（确认 AI 模型可用；不通则走 deepseek 降级）
-      - name: Diagnose TJU API
-        run: python tools/test_tju_api.py || true
-        env:
-          TJU_API_KEY: ${{ secrets.TJU_API_KEY }}
-          TJU_API_BASE: https://ai.tju.edu.cn/api/v3
-
-      # 云端 MP API 直连测试(wechat-grab 思路): 验证云端能否直接调 mp.weixin.qq.com 抓公众号
-      - name: Test MP API direct (cloud)
-        run: python tools/test_mp_api_cloud.py --limit 3 || true
-        env:
-          MP_COOKIE: ${{ secrets.MP_COOKIE }}
-          MP_TOKEN: ${{ secrets.MP_TOKEN }}
-
-      # 按 we-mp-rss 方法测云端能否拿到登录二维码(web 多篇模式能否云端复活)
+      # 临时验证: 云端能否按 we-mp-rss 方法拿到登录二维码(web 多篇模式云端可复活?)
       - name: Test we-mp-rss QR (cloud)
         run: python tools/test_wemp_qr_cloud.py || true
 
