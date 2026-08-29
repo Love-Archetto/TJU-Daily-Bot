@@ -32,6 +32,10 @@ jobs:
           MP_COOKIE: ${{ secrets.MP_COOKIE }}
           MP_TOKEN: ${{ secrets.MP_TOKEN }}
 
+      # 按 we-mp-rss 方法测云端能否拿到登录二维码(web 多篇模式能否云端复活)
+      - name: Test we-mp-rss QR (cloud)
+        run: python tools/test_wemp_qr_cloud.py || true
+
       - name: Run main pipeline
         run: |
           git config user.name "TJU Bot"
