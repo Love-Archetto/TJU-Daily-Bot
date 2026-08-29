@@ -102,29 +102,42 @@ async def main():
                            "请用手机微信扫码登录微信读书。扫码后本轮自动同步 wr_* cookie。",
                            image_path=str(img_path))
                 out.append("已发码到邮箱")
-                # 等扫码(轮询 wr_* cookie 出现或 120s)
-                for _ in range(150):
+                # 等扫码: 必须 wr_vid + wr_skey 都出现(wr_gid/fp 是游客cookie一直在, 不能作登录判据)
+                need = {"wr_vid", "wr_skey"}
+                logined = False
+                for _ in range(180):  # ~360s
                     await page.wait_for_timeout(2000)
-                    cookies = await ctx.cookies()
-                    if any(c["name"].startswith("wr_") for c in cookies):
-                        out.append("✅ 检测到 wr_* cookie, 登录成功")
+                    names = {c["name"] for c in await ctx.cookies()}
+                    if need.issubset(names):
+                        logined = True
+                        out.append("✅ 检测到 wr_vid+wr_skey, 登录成功")
                         break
-                else:
-                    out.append("⚠️ 120s 未检测到 wr_* cookie(可能未扫码)")
+                if not logined:
+                    out.append("⚠️ 360s 内未出现 wr_vid/wr_skey(扫码可能未真正完成, 或登录态在别处)")
+                    try:
+                        names = {c["name"] for c in await ctx.cookies()}
+                        out.append(f"  当前cookie名: {sorted(names)}")
+                    except Exception:
+                        pass
 
-                # 扫码后需访问 i.weread.qq.com(API域) 等才 set wr_skey/vid; 同时转储 localStorage
+                # 无论如何, 导航到 weread.qq.com / i.weread.qq.com 尝试触发完整 set-cookie
                 for nav in ["https://weread.qq.com/", "https://i.weread.qq.com/web/feed/home"]:
                     try:
                         await page.goto(nav, wait_until="domcontentloaded", timeout=30000)
-                        await page.wait_for_timeout(3000)
-                        out.append(f"已访问 {nav.removesuffix('/').split('//')[-1][:40]} 触发cookie")
-                        break  # 首个成功后即停
+                        await page.wait_for_timeout(4000)
+                        out.append(f"已访问 {nav.split('//')[-1].split('/')[0]} 触发cookie")
+                        break
                     except Exception as e:
-                        out.append(f"访问 {nav[:40]} 异常: {e}")
-                # 收集 localStorage + cookies
+                        out.append(f"访问异常: {e}")
+                # 导航后再查一次是否补齐 wr_vid/skey
+                cur = {c["name"] for c in await ctx.cookies()}
+                if need.issubset(cur):
+                    out.append("✅ 导航后补齐 wr_vid+wr_skey")
+                    logined = True
+                # 收集 localStorage(登录态可能存这) + cookies
                 ls = {}
                 try:
-                    ls = await page.evaluate("() => { const o={}; for (let i=0;i<localStorage.length;i++){const k=localStorage.key(i);o[k]=localStorage.getItem(k);} return o; }")
+                    ls = await page.evaluate("() => { const o={}; for (let i=0;i<localStorage.length;i++){const k=localStorage.key(i);o[k]=localStorage.getItem(k)?.slice(0,80);} return o; }")
                 except Exception:
                     pass
                 cookies = await ctx.cookies()
