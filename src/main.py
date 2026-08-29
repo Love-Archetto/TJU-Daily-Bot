@@ -335,12 +335,23 @@ def main() -> None:
         result = commit_and_push(f"daily report {beijing_now().strftime('%Y-%m-%d')}")
         logger.info("CI push: %s", result)
 
-    # 12. 若当前为北京 6:00 窗口(6:00-6:59), 生成当日汇总文件
-    #     (daily.yml 每2h cron + 每日北京6:00 cron 触发同一 main.py, 据此区分)
+    # 12. 若当前为北京 6:00 窗口(6:00-6:59), 生成当日汇总文件并邮件发送
     bj_hour = beijing_now().hour
     if bj_hour == 6:
         summary_path = build_daily_summary()
         logger.info("每日汇总已生成: %s", summary_path)
+        if summary_path and os.path.exists(summary_path):
+            try:
+                with open(summary_path, "r", encoding="utf-8") as f:
+                    summary_text = f.read()
+                from src.notifier import send_alert
+                ok = send_alert(
+                    f"📰 TJU Daily Bot 每日汇总 · {beijing_now().strftime('%Y-%m-%d')}",
+                    summary_text,
+                )
+                logger.info("每日汇总邮件发送: %s", "成功" if ok else "失败(检查SMTP)")
+            except Exception as e:
+                logger.warning("发送每日汇总邮件失败: %s", e)
 
     logger.info("TJU Daily Bot finished.")
 
