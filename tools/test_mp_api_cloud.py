@@ -12,7 +12,6 @@
 """
 
 import argparse
-import base64
 import os
 import sys
 from pathlib import Path
@@ -58,15 +57,11 @@ def main() -> None:
         return 1
 
     for name, fakeid in _load_first_fakeids(args.limit):
-        dec = None
-        try:
-            dec = base64.b64decode(fakeid).decode("utf-8")
-        except Exception:
-            dec = fakeid
         url = "https://mp.weixin.qq.com/cgi-bin/appmsg"
+        # appmsg 的 fakeid 参数用 base64 原值(如 MjM5...) 而非解码数字
         params = {
             "action": "list_ex", "begin": "0", "count": "3",
-            "fakeid": dec, "type": "9", "query": "", "token": token,
+            "fakeid": fakeid, "type": "9", "query": "", "token": token,
             "lang": "zh_CN", "f": "json",
         }
         headers = {
