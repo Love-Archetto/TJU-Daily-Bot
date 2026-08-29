@@ -1,17 +1,26 @@
 main_models:
-  # TJU 开源大模型平台（OpenAI 兼容协议）— 已验证可用（vLLM 服务 qwen3.6-35b）
+  # TJU 开源大模型平台（OpenAI 兼容，校内网/本地可访问）
+  # 注意：云端 GitHub Actions 连不上 ai.tju.edu.cn（校内网境外IP不可达）。
+  #    本地运行 tju 0.3s 即回；云端连不上 → 5s 超时自动切下一个模型。
   - model_name: "tju-llm"
     api_base: "https://ai.tju.edu.cn/api/v3"
     api_key_env: "TJU_API_KEY"
+    timeout_seconds: 5
+  # DeepSeek（海外可访问，云端首选）
   - model_name: "deepseek-chat"
     api_base: "https://api.deepseek.com/v1"
     api_key_env: "DEEPSEEK_API_KEY"
+  # OpenAI 备用
   - model_name: "gpt-4o-mini"
     api_base: "https://api.openai.com/v1"
     api_key_env: "OPENAI_API_KEY"
 
+# 报告检查器也参与降级：云端 tju 连不上 → 5s 后切 deepseek
 checker:
-  # TJU 模型用于报告检查（免费可用）
-  model_name: "tju-llm"
-  api_base: "https://ai.tju.edu.cn/api/v3"
-  api_key_env: "TJU_API_KEY"
+  - model_name: "tju-llm"
+    api_base: "https://ai.tju.edu.cn/api/v3"
+    api_key_env: "TJU_API_KEY"
+    timeout_seconds: 5
+  - model_name: "deepseek-chat"
+    api_base: "https://api.deepseek.com/v1"
+    api_key_env: "DEEPSEEK_API_KEY"

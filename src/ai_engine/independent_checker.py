@@ -1,21 +1,27 @@
 """独立检查模块 — 校验生成报告的质量。
 
+支持故障转移：checker 从 models.yaml 读取（可配置为单个模型或列表），
+按顺序尝试；每个模型可用各自的 timeout_seconds（如 tju-llm 设 5s，
+云端连不上 TJU 时快速切到下一个模型如 deepseek）。
+
 实现：
-- 从 models.yaml 加载 checker 模型
+- 从 models.yaml 加载 checker 模型列表
 - check(report_content) -> dict
 - 校验三部分分类、链接有效性、增量逻辑
-- token 上限 500，超时 15s
+- token 上限 500
 """
 
-import json
 import logging
 import os
+import json
 from typing import Any
 
 import yaml
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_TIMEOUT = 15
 
 CHECKER_PROMPT = """请检查以下信息简报的质量，返回 JSON 格式结果。
 
@@ -33,7 +39,7 @@ CHECKER_PROMPT = """请检查以下信息简报的质量，返回 JSON 格式结
 
 
 class IndependentChecker:
-    """独立检查器，校验报告合规性."""
+    """独立检查器，校验报告合规性，支持模型故障转移."""
 
     def __init__(self, config_path: str | None = None):
         if config_path is None:
@@ -42,35 +48,33 @@ class IndependentChecker:
             )
         with open(config_path, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f)
-        checker_cfg = config.get("checker", {})
-        self.model_name = checker_cfg.get("model_name", "gpt-4o-mini")
-        self.api_base = checker_cfg.get("api_base", "https://api.openai.com/v1")
-        self.api_key_env = checker_cfg.get("api_key_env", "OPENAI_API_KEY")
 
-    def check(self, report_content: str) -> dict[str, Any] | None:
-        """检查报告内容.
+        checker_cfg = config.get("checker")
+        # 兼容单个 dict 或列表
+        self.models = checker_cfg if isinstance(checker_cfg, list) else [checker_cfg]
+        self.models = [m for m in self.models if m]  # 过滤空
 
-        Args:
-            report_content: Markdown 报告内容
+    def _call_one(self, model_cfg: dict, content: str) -> dict[str, Any] | None:
+        """用单个模型执行检查，成功返回解析结果，失败返回 None."""
+        model_name = model_cfg.get("model_name")
+        api_base = model_cfg.get("api_base")
+        api_key_env = model_cfg.get("api_key_env")
+        api_key = os.environ.get(api_key_env, "") if api_key_env else ""
+        timeout = model_cfg.get("timeout_seconds") or DEFAULT_TIMEOUT
 
-        Returns:
-            {"passed": bool, "errors": [...], "warnings": [...]} 或 None（检查失败）
-        """
-        api_key = os.environ.get(self.api_key_env, "")
-        if not api_key:
-            logger.warning("Checker API key not set (%s), skipping check", self.api_key_env)
+        if not api_key or not model_name:
+            logger.warning("checker 模型缺 key/名称: %s", model_cfg)
             return None
 
-        # 截断报告内容以控制 token
-        if len(report_content) > 3000:
-            truncated = report_content[:3000] + "\n\n...(truncated)"
+        if len(content) > 3000:
+            truncated = content[:3000] + "\n\n...(truncated)"
         else:
-            truncated = report_content
+            truncated = content
 
         try:
-            client = OpenAI(api_key=api_key, base_url=self.api_base, timeout=15)
+            client = OpenAI(api_key=api_key, base_url=api_base, timeout=timeout)
             resp = client.chat.completions.create(
-                model=self.model_name,
+                model=model_name,
                 messages=[
                     {"role": "system", "content": CHECKER_PROMPT},
                     {"role": "user", "content": truncated},
@@ -78,21 +82,27 @@ class IndependentChecker:
                 temperature=0.1,
                 max_tokens=500,
             )
-            content = resp.choices[0].message.content or ""
-            # 解析 JSON
-            result = json.loads(content)
-            logger.info("Checker result: %s", result)
+            content_out = resp.choices[0].message.content or ""
+            result = json.loads(content_out)
+            logger.info("checker(%s) 结果: %s", model_name, result)
             return result
         except json.JSONDecodeError:
-            # 尝试修复
             try:
                 from json_repair import repair_json
-                content = repair_json(content)
-                result = json.loads(content)
+                result = json.loads(repair_json(content_out))
                 return result
             except Exception:
-                logger.warning("Checker returned invalid JSON, skipping")
+                logger.warning("checker(%s) 返回非法 JSON", model_name)
                 return None
         except Exception as e:
-            logger.warning("Checker call failed: %s", e)
+            logger.warning("checker(%s) 调用失败: %s", model_name, e)
             return None
+
+    def check(self, report_content: str) -> dict[str, Any] | None:
+        """按顺序尝试各 checker 模型，第一个成功即返回；全失败返回 None."""
+        for model_cfg in self.models:
+            result = self._call_one(model_cfg, report_content)
+            if result is not None:
+                return result
+        logger.warning("所有 checker 模型均失败")
+        return None

@@ -16,6 +16,10 @@ from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
+# 未显式配置 timeout_seconds 时的默认超时（秒）。openai 请求超时会抛异常，
+# 由 call() 捕获后切换到下一个模型（故障转移）。
+DEFAULT_TIMEOUT = 120
+
 
 class FaultTolerantClient:
     """顺序尝试多个模型，故障转移."""
@@ -72,7 +76,9 @@ class FaultTolerantClient:
                 continue
 
             try:
-                client = OpenAI(api_key=api_key, base_url=api_base)
+                # 每个模型可用各自的超时（如 tju-llm 设 timeout_seconds=5，超时快速切下一个）
+                timeout = model_cfg.get("timeout_seconds") or DEFAULT_TIMEOUT
+                client = OpenAI(api_key=api_key, base_url=api_base, timeout=timeout)
                 kwargs: dict[str, Any] = {
                     "model": model_name,
                     "messages": messages,
