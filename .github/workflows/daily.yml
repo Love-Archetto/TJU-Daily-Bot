@@ -17,14 +17,6 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 恢复微信读书登录态(weread.json, 由 scan_weread 手动扫码产生)
-      - uses: actions/cache@v4
-        with:
-          path: /tmp/we-mp-rss-data
-          key: weread-cookie-cache
-          restore-keys: |
-            weread-cookie-cache-
-
       - run: pip install -r requirements.txt
 
       - name: Run main pipeline
@@ -34,8 +26,8 @@ jobs:
           python src/main.py
         env:
           CI: true
-          # 公众号抓取用微信读书方案(读 weread.json 的 wr_* cookie)
-          WEREAD_SESSION_PATH: /tmp/we-mp-rss-data/weread.json
+          # 公众号抓取凭据(公开方案): 从 GitHub Secret 读, 用户手动填微信读书 wr_* cookie
+          WEREAD_COOKIE: ${{ secrets.WEREAD_COOKIE }}
           # 测试样本: 公众号只抓前 5 个(为验证/调试; 全量时删掉或设更大)
           WECHAT_SAMPLE: 5
           # TJU 开源大模型平台（主模型 + 检查器）

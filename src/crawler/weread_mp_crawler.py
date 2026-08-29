@@ -30,13 +30,23 @@ WEREAD_SESSION = os.environ.get("WEREAD_SESSION_PATH", "/tmp/we-mp-rss-data/were
 WEREAD_API = "https://weread.qq.com/api/mp/cover"
 # 每个公众号之间间隔(微信读书/page_interval 源码默认 1s)
 PAGE_INTERVAL = 1.0
+# 一次性告警守卫: 同一轮抓取内 401 只在首次触发邮件, 避免每个号都轰炸
+_ALERTED_LOGIN_FAIL = False
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
 
 def get_weread_cookie() -> str:
-    """从 session.json 或 env 取微信读书 cookie."""
+    """取微信读书 cookie. 优先级: env(WEREAD_COOKIE, 公开方案的 GitHub Secret) > /tmp 兜底.
+
+    云端: daily workflow 注入 WEREAD_COOKIE secret。本地: 可在 .env 设或临时用 /tmp 文件。
+    """
+    # 1. env 主来源(云端 Secret / 本地 .env)
+    env_cookie = os.environ.get("WEREAD_COOKIE", "").strip()
+    if env_cookie:
+        return env_cookie
+    # 2. /tmp 兜底(本地手工调试时用 weread.json)
     if os.path.exists(WEREAD_SESSION):
         try:
             with open(WEREAD_SESSION, "r", encoding="utf-8") as f:
@@ -46,7 +56,7 @@ def get_weread_cookie() -> str:
                 return c
         except Exception:
             pass
-    return os.environ.get("WEREAD_COOKIE", "")
+    return ""
 
 
 def fakeid_to_bookid(fakeid: str) -> str:
@@ -89,7 +99,15 @@ def fetch_latest_article(cookie: str, book_id: str, timeout: int = 15) -> dict[s
         # 详情: 空dict / 缺字段 / 含错误码
         keys = list(d.keys()) if isinstance(d, dict) else type(d).__name__
         err = d.get("errCode") if isinstance(d, dict) else None
-        logger.info("微信读书 %s 无 reviewId(keys=%s) errCode=%s", book_id, keys, err)
+        status_msg = d.get("statusMessage", "") if isinstance(d, dict) else ""
+        if r.status_code == 401 or "LOGIN ERR" in str(status_msg) or err == -2010:
+            # 微信读书 cookie 失效 → 明示并提醒用户重扫(一轮只发一封)
+            logger.warning("微信读书 %s login 失效(HTTP=%s %s errmsg=%s), 需重扫更新 wr_* cookie",
+                           book_id, r.status_code, status_msg,
+                           (d.get("data") or {}).get("errmsg", ""))
+            _maybe_alert_cookie_expired(book_id, r.status_code, str(d)[:200])
+        else:
+            logger.info("微信读书 %s 无 reviewId(keys=%s) errCode=%s", book_id, keys, err)
         return None
     review_id = d.get("reviewId", "")
     title = d.get("title", "")
@@ -101,6 +119,33 @@ def fetch_latest_article(cookie: str, book_id: str, timeout: int = 15) -> dict[s
         "publish_time": "",
         "digest": d.get("digest", ""),
     }
+
+
+def _maybe_alert_cookie_expired(book_id: str, status: int, detail: str) -> None:
+    """微信读书 cookie 失效时发一封提醒邮件(每轮仅一次).
+
+    本地无 SMTP 配置则静默(日志提示), 云端有则发到 NOTIFY_TO。
+    """
+    global _ALERTED_LOGIN_FAIL
+    if _ALERTED_LOGIN_FAIL:
+        return
+    _ALERTED_LOGIN_FAIL = True
+    try:
+        from src.notifier import send_cookie_expired_alert
+        guide = (
+            "【微信读书】cookie 已失效(401 LOGIN ERR / 用户不存在)。公众号抓取中断。\n\n"
+            f"首个失败: {book_id} (HTTP {status})\n"
+            f"详情: {detail}\n\n"
+            "解决办法(更新 WEREAD_COOKIE 为新的微信读书 cookie):\n"
+            "1. 用手机微信打开 weread.qq.com → 登录\n"
+            "2. F12 → Network → 任选请求, 复制 wr_vid/wr_skey 等 wr_* 的名字=值拼成 cookie\n"
+            "3. GitHub → Settings → Secrets and variables → Actions → 更新 WEREAD_COOKIE\n"
+            "4. 触发一次 \"TJU Daily Bot\" 主任务即可恢复\n"
+        )
+        if not send_cookie_expired_alert(1, "微信读书 " + guide):
+            logger.warning("cookie 失效邮件发送失败(检查 SMTP secret)")
+    except Exception as e:
+        logger.warning("发送 cookie 失效邮件异常: %s", e)
 
 
 def fetch_wechat_articles(account_names: list[str] | None = None) -> list[dict[str, Any]]:
@@ -129,7 +174,7 @@ def fetch_wechat_articles(account_names: list[str] | None = None) -> list[dict[s
 
     cookie = get_weread_cookie()
     if not cookie:
-        logger.warning("无微信读书 cookie(先运行 scan_weread 扫码), 跳过公众号抓取")
+        logger.warning("无微信读书 cookie(请在 Settings→Secrets 设 WEREAD_COOKIE), 跳过公众号抓取")
         return []
 
     articles = []

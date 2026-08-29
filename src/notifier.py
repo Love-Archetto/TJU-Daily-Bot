@@ -103,19 +103,17 @@ def send_alert(subject: str, body: str, image_path: str | None = None) -> bool:
 
 
 def send_cookie_expired_alert(expired_count: int, detail: str = "") -> bool:
-    """Cookie 过期专用告警."""
-    subject = "⚠️ TJU Daily Bot：微信公众号 Cookie 已过期"
+    """Cookie 过期专用告警(微信读书 wr_* cookie 失效 → 引导更新 WEREAD_COOKIE secret)."""
+    subject = "⚠️ TJU Daily Bot：微信读书 Cookie 已失效，需更新 WEREAD_COOKIE"
     body = (
-        "【需要操作】TJU Daily Bot 检测到微信公众号抓取 Cookie 已过期。\n"
-        f"过期公众号数：{expired_count}\n\n"
-        "请手动更新 GitHub Actions 中的 Secret：\n"
-        "  - WEREAD_COOKIE（某公众号平台 Cookie）\n"
-        "  - MP_QUERY_TOKEN（token）\n\n"
-        "操作步骤：\n"
-        "1. 登录 https://mp.weixin.qq.com 后台\n"
-        "2. F12 → Network → 刷新\n"
-        "3. 复制某个请求中的 Cookie 和 token\n"
-        "4. GitHub → Settings → Secrets → Actions → 更新对应 Secret\n\n"
-        "详细错误：\n" + (detail or "（无）")
+        "【需要操作】TJU Daily Bot 检测到微信公众号抓取凭据(微信读书 wr_* cookie)已失效。\n"
+        f"失效公众号数：{expired_count}\n\n"
+        "请手动更新 GitHub Actions 的 Secret：\n"
+        "1. 用手机微信打开 https://weread.qq.com 并登录\n"
+        "2. 电脑浏览器 F12 → Network → 刷新，任选一个请求\n"
+        "3. 在请求头里复制 Cookie 中所有 wr_* 条目(wr_vid、wr_skey 等)，拼成 \"wr_vid=xxx; wr_skey=yyy; ...\"\n"
+        "4. GitHub → Settings → Secrets and variables → Actions → 更新 WEREAD_COOKIE\n"
+        "5. 触发一次 \"TJU Daily Bot\" 主任务即可恢复公众号抓取\n\n"
+        + (detail or "（无）")
     )
     return send_alert(subject, body)
