@@ -51,18 +51,44 @@ async def main():
             except Exception as e:
                 out.append(f"点登录异常: {e}")
 
-            # 在登录弹窗里找二维码(微信读书弹窗内二维码可能是 img/canvas)
-            qr = None
-            for _ in range(10):
-                qr = (await page.query_selector("img[src*='qrcode'], img[src*='qr'], canvas, .wr-nest-dialog img, [class*='login'] img, [class*='qrcode']"))
-                if qr and await qr.is_visible():
-                    break
+            # 在登录弹窗里找二维码: 优先用已记忆的选择器, 找不到则全量探测并记住
+            QR_SELECTORS = [
+                "img[src*='qrcode']", "img[src*='qr']", "canvas",
+                ".wr-nest-dialog img", "[class*='login'] img", "[class*='qrcode']",
+            ]
+            SEL_SAVE = os.path.join(DATA_DIR, "weread_qr_selector.json")
+            # 读记忆
+            used_sel = None
+            if os.path.exists(SEL_SAVE):
                 try:
-                    if await page.query_selector(".wr-nest-dialog, [class*='login']"):
-                        pass
+                    used_sel = json.load(open(SEL_SAVE, encoding="utf-8")).get("selector")
                 except Exception:
-                    pass
-                await page.wait_for_timeout(1500)
+                    used_sel = None
+            qr = None
+            if used_sel:
+                try:
+                    qr = await page.query_selector(used_sel)
+                    if qr and await qr.is_visible():
+                        out.append(f"用记忆选择器定位二维码: {used_sel}")
+                except Exception:
+                    qr = None
+            # 全量探测(一次运行中学习)
+            if qr is None:
+                for try_sel in QR_SELECTORS:
+                    for _ in range(10):
+                        try:
+                            q = await page.query_selector(try_sel)
+                            if q and await q.is_visible():
+                                qr = q
+                                os.makedirs(DATA_DIR, exist_ok=True)
+                                json.dump({"selector": try_sel}, open(SEL_SAVE, "w", encoding="utf-8"))
+                                out.append(f"✅ 探到二维码选择器并记忆: {try_sel}")
+                                break
+                        except Exception:
+                            pass
+                        await page.wait_for_timeout(1200)
+                    if qr:
+                        break
             if qr:
                 img_path = PROJECT_ROOT / "tools" / "_wr_qr.png"
                 try:
