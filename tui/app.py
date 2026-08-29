@@ -165,7 +165,9 @@ class TjuTuiApp(App):
         file_list.clear()
         files = list_outputs()
         for f in files.get("files", []):
-            file_list.append(ListItem(Static(f)))
+            li = ListItem(Static(f))
+            li.filename = f  # 存储文件名, 供点击事件直接读取
+            file_list.append(li)
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """点击右侧文件列表项时，打开对应报告."""
@@ -173,8 +175,8 @@ class TjuTuiApp(App):
         chat_log = self.query_one("#chat-log", RichLog)
         if not item:
             return
-        label = item.get_child_by_type(Static).renderable if isinstance(item, ListItem) else str(item)
-        fname = str(label).strip()
+        # 文件名存在 ListItem.filename(见 _refresh_file_list), 直接读取最稳
+        fname = str(getattr(item, "filename", "")).strip()
         if not fname:
             return
         result = open_report(fname)
