@@ -1,9 +1,15 @@
 prefer_function_calling: true
 
-model:
-  model_name: "deepseek-chat"
-  api_base: "https://api.deepseek.com/v1"
-  api_key_env: "DEEPSEEK_API_KEY"
+models:
+  # TJU 平台(本地校内可访问, 0.3s 快); 云端/未配 key 则跳过。5s 超时切下一个
+  - model_name: "tju-llm"
+    api_base: "https://ai.tju.edu.cn/api/v3"
+    api_key_env: "TJU_API_KEY"
+    timeout_seconds: 5
+  # DeepSeek(公网可达), 兜底
+  - model_name: "deepseek-chat"
+    api_base: "https://api.deepseek.com/v1"
+    api_key_env: "DEEPSEEK_API_KEY"
 
 system_prompt: |
   你是一个帮助天津大学学生管理日常信息的助手。你可以调用工具完成操作，请根据用户意图选择合适的工具。

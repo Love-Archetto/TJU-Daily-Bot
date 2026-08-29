@@ -73,7 +73,11 @@ class Agent:
             self.config = yaml.safe_load(f)
 
         self.prefer_fc = self.config.get("prefer_function_calling", True)
+        # 支持 models 列表(多模型降级)或单个 model
         self.model_cfg = self.config.get("model", {})
+        raw_models = self.config.get("models")
+        self.models_cfg = raw_models if isinstance(raw_models, list) else [self.model_cfg]
+        self.models_cfg = [m for m in self.models_cfg if m]
         self.system_prompt = self.config.get("system_prompt", "")
         self.temperature = self.config.get("temperature", 0.3)
         self.max_tokens = self.config.get("max_tokens", 800)
@@ -86,11 +90,25 @@ class Agent:
         self._init_client()
 
     def _init_client(self) -> None:
-        """初始化 OpenAI 客户端."""
-        api_key = os.environ.get(self.model_cfg.get("api_key_env", ""), "")
+        """初始化可用模型客户端列表(有 API key 的才加)."""
         self.api_base = self.model_cfg.get("api_base", "")
-        self.model_name = self.model_cfg.get("model_name", "")
-        self.client = OpenAI(api_key=api_key, base_url=self.api_base) if api_key else None
+        self.model_name = self.model_cfg.get("model_name", self.models_cfg[0].get("model_name", ""))
+        self.clients = []  # list of (client, model_name, timeout)
+        for cfg in self.models_cfg:
+            env = cfg.get("api_key_env", "")
+            api_key = os.environ.get(env, "") if env else ""
+            if not api_key or not cfg.get("model_name"):
+                continue
+            timeout = cfg.get("timeout_seconds") or 120
+            try:
+                client = OpenAI(api_key=api_key, base_url=cfg.get("api_base", ""), timeout=timeout)
+                self.clients.append((client, cfg["model_name"], timeout))
+            except Exception as e:
+                logger.warning("初始化模型 %s 失败: %s", cfg.get("model_name"), e)
+        # 兼容旧 .client 引用
+        self.client = self.clients[0][0] if self.clients else None
+        if not self.clients:
+            logger.warning("TUI 无可用模型客户端(检查 .env 的 API key)")
 
     def _try_parse_json(self, text: str) -> dict[str, Any] | None:
         """三层 JSON 解析：json.loads → json_repair → 正则提取."""
@@ -145,47 +163,47 @@ class Agent:
         return None
 
     def _call_model(self, retry_count: int = 0) -> dict[str, Any] | None:
-        """调用模型，支持 Function Calling 降级和最多 2 次重试."""
-        if self.client is None:
+        """调用模型，支持多模型故障转移 + Function Calling 降级 + 最多 2 次重试."""
+        if not self.clients:
             return None
 
         max_retries = 2
-        for attempt in range(max_retries + 1):
-            try:
-                kwargs: dict[str, Any] = {
-                    "model": self.model_name,
-                    "messages": self.messages,
-                    "temperature": self.temperature,
-                    "max_tokens": self.max_tokens,
-                }
+        # 遍历可用模型客户端, 逐个尝试; 某模型连续失败则切下一个
+        for client, model_name, _timeout in self.clients:
+            for attempt in range(max_retries + 1):
+                try:
+                    kwargs: dict[str, Any] = {
+                        "model": model_name,
+                        "messages": self.messages,
+                        "temperature": self.temperature,
+                        "max_tokens": self.max_tokens,
+                    }
 
-                if self.prefer_fc and self.tools_schema:
-                    try:
-                        kwargs["tools"] = self.tools_schema
-                        kwargs["tool_choice"] = "auto"
-                        resp = self.client.chat.completions.create(**kwargs)
-                        return resp
-                    except Exception as e:
-                        if "tools" in str(e).lower() or "tool" in str(e).lower():
-                            logger.info("Model does not support tools, retrying without")
-                            kwargs.pop("tools", None)
-                            kwargs.pop("tool_choice", None)
-                            self.prefer_fc = False  # 永久降级
-                        else:
-                            raise
+                    if self.prefer_fc and self.tools_schema:
+                        try:
+                            kwargs["tools"] = self.tools_schema
+                            kwargs["tool_choice"] = "auto"
+                            return client.chat.completions.create(**kwargs)
+                        except Exception as e:
+                            if "tools" in str(e).lower() or "tool" in str(e).lower():
+                                logger.info("Model does not support tools, retrying without")
+                                kwargs.pop("tools", None)
+                                kwargs.pop("tool_choice", None)
+                                self.prefer_fc = False  # 永久降级
+                            else:
+                                raise
 
-                resp = self.client.chat.completions.create(**kwargs)
-                return resp
+                    return client.chat.completions.create(**kwargs)
 
-            except Exception as e:
-                logger.warning("Model call attempt %d failed: %s", attempt + 1, e)
-                if attempt < max_retries:
-                    self.messages.append({
-                        "role": "system",
-                        "content": f"上次调用失败: {e}。请重试。",
-                    })
-                else:
-                    return None
+                except Exception as e:
+                    logger.warning("模型 %s 尝试 %d 失败: %s", model_name, attempt + 1, e)
+                    if attempt < max_retries:
+                        self.messages.append({
+                            "role": "system",
+                            "content": f"上次调用失败: {e}。请重试。",
+                        })
+                    else:
+                        break  # 该模型耗尽重试, 切下一个模型
 
         return None
 
