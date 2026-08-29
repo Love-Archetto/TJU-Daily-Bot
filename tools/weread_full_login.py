@@ -37,9 +37,32 @@ async def main():
             await page.wait_for_timeout(4000)
             out.append(f"页面URL: {page.url[:80]}")
 
-            # 尝试等二维码(微信读书网页版登录)或检测是否已登录(直接进首页)
-            # 策略: 若 URL 仍是登录/含 login, 尝试找二维码; 若已进首页说明已有会话
-            qr = await page.query_selector("img[src*='qrcode'], img[src*='wx_qr'], .qr-code img, canvas")
+            # 微信读书需先点「登录」按钮才弹出二维码登录弹窗
+            try:
+                login_btn = (await page.query_selector("text=登录")
+                             or await page.query_selector("button:has-text('登录')")
+                             or await page.query_selector("a:has-text('登录')"))
+                if login_btn and await login_btn.is_visible():
+                    await login_btn.click()
+                    out.append("已点击「登录」按钮")
+                    await page.wait_for_timeout(2000)
+                else:
+                    out.append("未找到可点登录按钮(可能已登录/布局不同)")
+            except Exception as e:
+                out.append(f"点登录异常: {e}")
+
+            # 在登录弹窗里找二维码(微信读书弹窗内二维码可能是 img/canvas)
+            qr = None
+            for _ in range(10):
+                qr = (await page.query_selector("img[src*='qrcode'], img[src*='qr'], canvas, .wr-nest-dialog img, [class*='login'] img, [class*='qrcode']"))
+                if qr and await qr.is_visible():
+                    break
+                try:
+                    if await page.query_selector(".wr-nest-dialog, [class*='login']"):
+                        pass
+                except Exception:
+                    pass
+                await page.wait_for_timeout(1500)
             if qr:
                 img_path = PROJECT_ROOT / "tools" / "_wr_qr.png"
                 try:
@@ -63,7 +86,16 @@ async def main():
                 else:
                     out.append("⚠️ 120s 未检测到 wr_* cookie(可能未扫码/登录方式不同)")
             else:
-                out.append("未找到二维码元素, 直接检查是否已有会话")
+                out.append("未找到二维码元素(可能未弹出登录弹窗/布局不同)")
+                # 诊断: 截图 + 页面文本, 供下轮定位
+                try:
+                    page.screenshot(path=str(PROJECT_ROOT / "tools" / "_wr_diag.png"))
+                    body = await page.content()
+                    import re
+                    text = re.sub(r"<[^>]+>", " ", body)
+                    out.append("页面文本片段: " + " ".join(text.split())[:200])
+                except Exception as e:
+                    out.append(f"诊断截图失败: {e}")
                 cookies = await ctx.cookies()
                 wr = [c for c in cookies if c["name"].startswith("wr_")]
                 out.append(f"已有 wr_* cookie: {len(wr)}")
