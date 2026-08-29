@@ -32,6 +32,7 @@ async def main():
             locale="zh-CN",
         )
         page = await ctx.new_page()
+        ls = {}  # localStorage(登录态可能存这里而非 cookie)
         try:
             await page.goto(WEREAD_URL, wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_timeout(4000)
@@ -111,15 +112,21 @@ async def main():
                 else:
                     out.append("⚠️ 120s 未检测到 wr_* cookie(可能未扫码)")
 
-                # 扫码后可能需要刷新/导航才能让 wr_vid/wr_skey 全量设置
-                # 先 refresh 首页, 再尝试访问需登录的接口触发完整 set-cookie
+                # 扫码后需访问 i.weread.qq.com(API域) 等才 set wr_skey/vid; 同时转储 localStorage
+                for nav in ["https://weread.qq.com/", "https://i.weread.qq.com/web/feed/home"]:
+                    try:
+                        await page.goto(nav, wait_until="domcontentloaded", timeout=30000)
+                        await page.wait_for_timeout(3000)
+                        out.append(f"已访问 {nav.removesuffix('/').split('//')[-1][:40]} 触发cookie")
+                        break  # 首个成功后即停
+                    except Exception as e:
+                        out.append(f"访问 {nav[:40]} 异常: {e}")
+                # 收集 localStorage + cookies
+                ls = {}
                 try:
-                    await page.goto(WEREAD_URL, wait_until="domcontentloaded", timeout=30000)
-                    await page.wait_for_timeout(3000)
-                    out.append("已刷新首页以触发完整 cookie")
-                except Exception as e:
-                    out.append(f"刷新首页异常: {e}")
-                # 再强刷一次 cookie 集合
+                    ls = await page.evaluate("() => { const o={}; for (let i=0;i<localStorage.length;i++){const k=localStorage.key(i);o[k]=localStorage.getItem(k);} return o; }")
+                except Exception:
+                    pass
                 cookies = await ctx.cookies()
             else:
                 out.append("未找到二维码元素(可能未弹出登录弹窗/布局不同)")
@@ -142,11 +149,20 @@ async def main():
             if wr:
                 cookie_str = "; ".join(f"{k}={v}" for k, v in wr.items())
                 os.makedirs(DATA_DIR, exist_ok=True)
+                payload = {"cookie": cookie_str, "cookies": wr, "localStorage": ls}
                 with open(SAVE, "w", encoding="utf-8") as f:
-                    json.dump({"cookie": cookie_str, "cookies": wr}, f, ensure_ascii=False, indent=2)
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
                 out.append(f"✅ wr_* cookie 已保存: {SAVE} ({len(wr)} 个: {list(wr.keys())})")
             else:
-                out.append("❌ 未获得 wr_* cookie(扫码未完成或微信读书网页版无此 cookie)")
+                # 若 cookie 无 wr_*, 也许登录态在 localStorage
+                out.append("⚠️ cookie 无 wr_*(检查 localStorage)")
+                os.makedirs(DATA_DIR, exist_ok=True)
+                with open(SAVE, "w", encoding="utf-8") as f:
+                    json.dump({"cookie": "", "cookies": {}, "localStorage": ls}, f, ensure_ascii=False, indent=2)
+                # 列出所有 cookie 名便于诊断
+                alln = [c["name"] for c in cookies]
+                out.append(f"  所有 cookie 名: {alln}")
+                out.append(f"  localStorage keys: {list(ls.keys())[:20]}")
         except Exception as e:
             out.append(f"异常: {type(e).__name__}: {str(e)[:200]}")
         finally:
