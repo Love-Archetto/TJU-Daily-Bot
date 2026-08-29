@@ -258,7 +258,11 @@ def main() -> None:
         if source_type == "web":
             url = source.get("url", "")
             selectors = source.get("selectors", {})
-            articles = fetch_articles_from_list_page(url, selectors)
+            try:
+                articles = fetch_articles_from_list_page(url, selectors)
+            except Exception as e:
+                logger.error("网站信源 %s 抓取失败(跳过): %s", source_name, e)
+                articles = []
             for a in articles:
                 a["source"] = source_name
             all_articles.extend(articles)

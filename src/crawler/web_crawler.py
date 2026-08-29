@@ -74,7 +74,11 @@ def fetch_articles_from_list_page(url: str, selectors: dict[str, str]) -> list[d
     # 通用 CMS 模式优先
     item_container = selectors.get("item_container")
     if item_container:
-        items = soup.select(item_container)
+        try:
+            items = soup.select(item_container)
+        except Exception as e:
+            logger.error("CSS 选择器无效(%s) for %s: %s", item_container, url, e)
+            return []
         for it in items:
             # 优先 /info/ 的文章链接
             a_el = it.select_one('a[href*="/info/"]') or it.select_one("a")
