@@ -106,6 +106,15 @@ def main() -> None:
                 out.append(f"  微信读书状态 HTTP {rs.status_code}: {rs.text[:300]}")
             except requests.RequestException as e:
                 out.append(f"  /weread 状态请求异常: {e}")
+            # 系统信息：文章总数（验证 we-mp-rss 是否真的抓到文章，回应用户「0篇是否因已入库跳过」质疑）
+            try:
+                ri = requests.get(f"{base}{API_PREFIX}/sys/info", headers=hdr, timeout=30)
+                if ri.status_code == 200:
+                    out.append(f"  文章统计 HTTP {ri.status_code}: {ri.text[:300]}")
+                else:
+                    out.append(f"  文章统计 HTTP {ri.status_code}: {ri.text[:200]}")
+            except requests.RequestException as e:
+                out.append(f"  /sys/info 请求异常: {e}")
             # 对一个订阅测 mp 采集连接
             if subs:
                 fid = subs[0][0]
