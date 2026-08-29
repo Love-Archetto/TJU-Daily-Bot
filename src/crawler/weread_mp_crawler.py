@@ -74,12 +74,22 @@ def fetch_latest_article(cookie: str, book_id: str, timeout: int = 15) -> dict[s
     try:
         r = requests.get(WEREAD_API, params={"bookId": book_id},
                          headers=headers, timeout=timeout)
+    except Exception as e:
+        logger.warning("微信读书 cover 请求异常 %s: %s", book_id, e)
+        return None
+    # 详细日志: HTTP 状态 + 响应前 300 字符, 便于判断鉴权/风控/空
+    logger.info("微信读书 cover %s HTTP=%s 前300: %s",
+                book_id, r.status_code, r.text[:300].replace("\n", " "))
+    try:
         d = r.json()
     except Exception as e:
-        logger.warning("微信读书 cover 请求失败 %s: %s", book_id, e)
+        logger.warning("cover 返回非JSON(%s): %s", r.status_code, r.text[:200])
         return None
     if not d or "reviewId" not in d:
-        logger.info("微信读书 %s 暂无文章", book_id)
+        # 详情: 空dict / 缺字段 / 含错误码
+        keys = list(d.keys()) if isinstance(d, dict) else type(d).__name__
+        err = d.get("errCode") if isinstance(d, dict) else None
+        logger.info("微信读书 %s 无 reviewId(keys=%s) errCode=%s", book_id, keys, err)
         return None
     review_id = d.get("reviewId", "")
     title = d.get("title", "")
