@@ -28,10 +28,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tui.agent import Agent
 from tui.local_git import commit_and_push, commit_only, get_output_files
-from tui.tools import list_outputs
+from tui.tools import list_outputs, open_report
 
 # 命令白名单
-COMMAND_WHITELIST = {"/load_history", "/save", "/quit"}
+COMMAND_WHITELIST = {"/load_history", "/save", "/quit", "/copy"}
 
 
 class TjuTuiApp(App):
@@ -117,6 +117,7 @@ class TjuTuiApp(App):
         chat_log.write("输入消息与 Agent 对话，或使用命令：")
         chat_log.write("  [bold]/load_history[/bold] - 加载上次对话")
         chat_log.write("  [bold]/save[/bold] - 保存当前对话")
+        chat_log.write("  [bold]/copy[/bold] - 复制最近对话到剪贴板")
         chat_log.write("  [bold]/quit[/bold] - 保存并退出")
         chat_log.write("")
 
@@ -165,6 +166,22 @@ class TjuTuiApp(App):
         files = list_outputs()
         for f in files.get("files", []):
             file_list.append(ListItem(Static(f)))
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        """点击右侧文件列表项时，打开对应报告."""
+        item = event.item
+        chat_log = self.query_one("#chat-log", RichLog)
+        if not item:
+            return
+        label = item.get_child_by_type(Static).renderable if isinstance(item, ListItem) else str(item)
+        fname = str(label).strip()
+        if not fname:
+            return
+        result = open_report(fname)
+        if result.get("success"):
+            chat_log.write(f"[dim]📄 已打开报告: {fname}[/dim]")
+        else:
+            chat_log.write(f"[yellow]打不开报告 {fname}: {result.get('message','')}[/yellow]")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """按钮事件处理."""
@@ -226,6 +243,26 @@ class TjuTuiApp(App):
                 chat_log.write(f"[dim]📂 已加载历史对话 ({ts}, {msg_count} 条消息)[/dim]")
             else:
                 chat_log.write("[dim]📂 没有可加载的历史对话[/dim]")
+
+        elif command == "/copy":
+            # 把最近对话复制到系统剪贴板(Windows clip.exe), 替代无法选中的 RichLog
+            try:
+                lines = []
+                for m in getattr(self.agent, "messages", []):
+                    role = m.get("role", "")
+                    content = m.get("content", "")
+                    if content:
+                        lines.append(f"{role}: {content}")
+                text = "\n".join(lines)
+                if not text:
+                    chat_log.write("[dim]📋 暂无对话可复制[/dim]")
+                    return
+                import subprocess
+                subprocess.run(["clip"], input=text.encode("utf-16le",
+                              errors="replace") + b"\xff\xfe", check=True)
+                chat_log.write(f"[dim]📋 已复制 {len(lines)} 条对话到剪贴板[/dim]")
+            except Exception as e:
+                chat_log.write(f"[dim]📋 复制失败: {e}[/dim]")
 
         elif command == "/save":
             filename = self.agent.save_history()
