@@ -140,6 +140,17 @@ class TjuTuiApp(App):
             chat_log.write("  公众号内容由 GitHub Actions 定时生成并 push（output/ 下 .md）。")
             chat_log.write("  使用「搜索」前建议先 git pull 同步最新历史报告。")
 
+        # 展示"不可达校内网信源"表格（9 个云端/本地连不上的 tju.edu.cn 域名）
+        unreachable = [
+            ("jwc", "教务处"), ("xsc", "学生处"), ("yjsy", "研究生院"),
+            ("bks", "本科生招生"), ("yjszs", "研究生招生"), ("career", "就业指导"),
+            ("library", "图书馆"), ("ic", "信息网络中心"), ("se", "软件学院"),
+        ]
+        chat_log.write("[dim]──── 校内网信源（本机/云端不可达，未接入）────[/dim]")
+        for sub, label in unreachable:
+            chat_log.write(f"  [dim]{sub}.tju.edu.cn  · {label}[/dim]")
+        chat_log.write("[dim]  这些为校园网服务，公网/云端无法访问，故未配置为网站信源。[/dim]")
+
         # 检查历史文件
         history_dir = os.path.join(os.path.dirname(__file__), "..", "history")
         if os.path.isdir(history_dir):
