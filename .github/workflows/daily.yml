@@ -43,6 +43,13 @@ jobs:
 
       - run: pip install -r requirements.txt
 
+      # 诊断 TJU API 在云端的连通性（确认模型能否访问、响应是否 >15s 拖垮 checker）
+      - name: Diagnose TJU API
+        run: python tools/test_tju_api.py || true
+        env:
+          TJU_API_KEY: ${{ secrets.TJU_API_KEY }}
+          TJU_API_BASE: https://ai.tju.edu.cn/api/v3
+
       # 等待 we-mp-rss 就绪（health check 可能起不齐，额外拉一个就绪等待）
       - name: Wait for we-mp-rss
         run: |
