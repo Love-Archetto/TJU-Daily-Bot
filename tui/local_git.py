@@ -84,6 +84,31 @@ def commit_and_push(message: str) -> dict[str, Any]:
         return {"success": False, "message": f"Push failed: {err}"}
 
 
+def commit_config_and_push(message: str = "update config") -> dict[str, Any]:
+    """只提交 config/ 目录(画像/关键词/配置)并推送.
+
+    供 TUI 在本地改了用户画像、关键词等配置后固化并同步云端。
+    不触碰 output/ 等(云端管理)。
+    """
+    full_message = f"data: {message}"
+    rc, out, err = _run_git(["add", "config/"])
+    if rc != 0:
+        return {"success": False, "message": f"git add config/ failed: {err}"}
+
+    rc, out, err = _run_git(["commit", "-m", full_message])
+    if rc == 0:
+        logger.info("Committed config: %s", full_message)
+    elif "nothing to commit" in (out + err).lower():
+        return {"success": True, "message": "Nothing to commit (config 无变化)"}
+    else:
+        return {"success": False, "message": f"Commit failed: {err}"}
+
+    r2, o2, e2 = _run_git(["push", "origin", "main"])
+    if r2 == 0:
+        return {"success": True, "message": "配置已提交并推送"}
+    return {"success": False, "message": f"Commit ok, 但 push 失败: {e2}"}
+
+
 def pull_latest() -> dict[str, Any]:
     """拉取最新代码.
 

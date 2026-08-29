@@ -27,6 +27,7 @@ from textual.reactive import reactive
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tui.agent import Agent
+from tui.local_git import commit_config_and_push
 from tui.tools import list_outputs, open_report
 
 # 命令白名单
@@ -89,6 +90,7 @@ class TjuTuiApp(App):
                 yield Static("📁 报告列表", id="file-title")
                 yield ListView(id="file-list")
         with Horizontal(id="button-bar"):
+            yield Button("提交配置", id="btn-config-push", variant="primary")
             yield Button("仅Save", id="btn-save", variant="default")
             yield Button("退出", id="btn-quit", variant="error")
         yield Footer()
@@ -187,7 +189,14 @@ class TjuTuiApp(App):
         chat_log = self.query_one("#chat-log", RichLog)
         button_id = event.button.id
 
-        if button_id == "btn-save":
+        if button_id == "btn-config-push":
+            result = commit_config_and_push("update config via TUI")
+            if result.get("success"):
+                chat_log.write(f"[dim]🛠️ {result['message']}[/dim]")
+            else:
+                chat_log.write(f"[yellow]🛠️ {result.get('message','提交失败')}[/yellow]")
+
+        elif button_id == "btn-save":
             filename = self.agent.save_history()
             if filename:
                 chat_log.write(f"[dim]💾 对话已保存: {filename}[/dim]")
