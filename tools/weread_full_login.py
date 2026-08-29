@@ -52,11 +52,6 @@ async def main():
             except Exception as e:
                 out.append(f"点登录异常: {e}")
 
-            # 在登录弹窗里找二维码: 优先用已记忆的选择器, 找不到则全量探测并记住
-            QR_SELECTORS = [
-                "img[src*='qrcode']", "img[src*='qr']", "canvas",
-                ".wr-nest-dialog img", "[class*='login'] img", "[class*='qrcode']",
-            ]
             SEL_SAVE = os.path.join(DATA_DIR, "weread_qr_selector.json")
             # 读记忆
             used_sel = None
@@ -73,18 +68,25 @@ async def main():
                         out.append(f"用记忆选择器定位二维码: {used_sel}")
                 except Exception:
                     qr = None
-            # 全量探测(一次运行中学习)
+            # 全量探测: 优先登录弹窗内二维码 + 校验近似方形(避免截到书封)
             if qr is None:
-                for try_sel in QR_SELECTORS:
+                qr_selectors = [
+                    ".wr-nest-dialog img[src*='qr'], [class*='login'] img[src*='qr'], img[src*='qrcode']",
+                    ".wr-nest-dialog img, [class*='login'] img, img[src*='qr']",
+                    "img[src*='qr']", "img[src*='qrcode']",
+                ]
+                for try_sel in qr_selectors:
                     for _ in range(10):
                         try:
                             q = await page.query_selector(try_sel)
                             if q and await q.is_visible():
-                                qr = q
-                                os.makedirs(DATA_DIR, exist_ok=True)
-                                json.dump({"selector": try_sel}, open(SEL_SAVE, "w", encoding="utf-8"))
-                                out.append(f"✅ 探到二维码选择器并记忆: {try_sel}")
-                                break
+                                box = await q.bounding_box()
+                                if box and box["width"] >= 100 and abs(box["width"] - box["height"]) < box["width"] * 0.3:
+                                    qr = q
+                                    os.makedirs(DATA_DIR, exist_ok=True)
+                                    json.dump({"selector": try_sel}, open(SEL_SAVE, "w", encoding="utf-8"))
+                                    out.append(f"✅ 探到二维码选择器并记忆: {try_sel} ({int(box['width'])}x{int(box['height'])})")
+                                    break
                         except Exception:
                             pass
                         await page.wait_for_timeout(1200)
