@@ -1,6 +1,7 @@
 name: WeChat Scan Auth (manual)
-# 手动触发扫码: 用户方便时 Run workflow → 云端 we-mp-rss 生成登录二维码 → 发到邮箱 → 用户扫码
-# → 会话存入 /app/data 并通过 cache 持久化, 供主 daily 工作流恢复(抓公众号多篇)。
+# 手动触发扫码登录: 用户方便时 Run workflow → 云端 Playwright 生成微信公众平台登录二维码
+# → 发到邮箱 → 用户扫码 → 捕捉会话保存到 /tmp/we-mp-rss-data/session.json(供主 daily 用)。
+# 绕开 we-mp-rss 内部坏的扫码接口(独立 Playwright 已证云端能生成码)。
 on:
   workflow_dispatch:
 permissions:
@@ -8,52 +9,30 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    services:
-      we-mp-rss:
-        image: rachelos/we-mp-rss:latest
-        ports:
-          - 8001:8001
-        volumes:
-          - /tmp/we-mp-rss-data:/app/data
-        env:
-          USERNAME: admin
-          PASSWORD: admin@123
-          # web=微信公众平台多篇采集模式
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      # 恢复之前积累的会话/订阅数据(关键: 会话跨 workflow 持久化)
+      # 恢复之前会话所在目录(可选; 若 later 用 we-mp-rss 才需要, 现在独立登录先空)
       - uses: actions/cache@v4
         with:
           path: /tmp/we-mp-rss-data
-          key: we-mp-rss-data-${{ github.run_id }}
+          key: wmp-session-cache
           restore-keys: |
-            we-mp-rss-data-
+            wmp-session-cache-
 
       - run: pip install -r requirements.txt
-
-      # 等 we-mp-rss 就绪
-      - name: Wait for we-mp-rss
+      - name: Setup Playwright
         run: |
-          for i in $(seq 1 40); do
-            if curl -sf http://localhost:8001/ >/dev/null 2>&1; then echo "ready"; break; fi
-            sleep 5
-          done
+          pip install playwright
+          python -m playwright install chromium
 
-      # 初始化订阅(幂等, 从 sources.yaml 加公众号) - 少量本测试也设 WECHAT_SAMPLE
-      - name: Init subscriptions
-        run: python tools/init_wechat_subscriptions.py --base http://localhost:8001 --limit 5
+      # 完整扫码登录: 生成码→发邮箱→等扫码→捉会话
+      - name: Full WeChat login
+        run: python tools/wemp_full_login.py
         env:
-          WE_MP_RSS_BASE: http://localhost:8001
-
-      # 生成二维码→发邮箱→等扫码(手动触发, 时机由用户掌握); 会话写 /app/data
-      - name: Scan QR and authen
-        run: python tools/wemp_scan_auth.py --base http://localhost:8001 --wait-seconds 300
-        env:
-          WE_MP_RSS_BASE: http://localhost:8001
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_TLS: ${{ secrets.SMTP_TLS }}
@@ -61,6 +40,9 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
           NOTIFY_TO: ${{ secrets.NOTIFY_TO }}
-          # 微信公众平台登录用(如需); 容器内扫码以 admin 会话驱动
-          MP_COOKIE: ${{ secrets.MP_COOKIE }}
-          MP_TOKEN: ${{ secrets.MP_TOKEN }}
+
+      # 存缓存(会话), 供主 daily 恢复
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/we-mp-rss-data
+          key: wmp-session-cache
