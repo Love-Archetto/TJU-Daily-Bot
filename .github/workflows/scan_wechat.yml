@@ -41,6 +41,10 @@ jobs:
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
           NOTIFY_TO: ${{ secrets.NOTIFY_TO }}
 
+      # 验证: 用捉到的新鲜会话直连 appmsg 抓公众号(是否多篇/是否freq control)
+      - name: Test fetch with session
+        run: python tools/fetch_gzh_test.py --limit 3 --interval 3 || true
+
       # 存缓存(会话), 供主 daily 恢复
       - uses: actions/cache@v4
         with:
