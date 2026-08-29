@@ -18,6 +18,7 @@ system_prompt: |
   - list_outputs: 列出所有报告
   - open_report: 打开指定报告
   - search: 在已抓取内容中搜索
+  - tju_wiki_query: 查询北洋维基校园生活信息(校历/奖学金/转专业/报到/军训等)，参数 cmd 为 search/cat/cats/read/latest/home
   - git_commit_only: 仅提交不推送
   - git_commit_push: 提交并推送
 
@@ -92,6 +93,16 @@ tools_schema:
           query: {"type": "string", "description": "搜索关键词"}
           source: {"type": "string", "description": "限定信源名称"}
         required: ["query"]
+  - type: "function"
+    function:
+      name: "tju_wiki_query"
+      description: "查询北洋维基校园信息(天大校历/奖学金/转专业/报到/军训/图书馆等)，cmd 为 search/cat/cats/read/latest/home"
+      parameters:
+        type: "object"
+        properties:
+          cmd: {"type": "string", "description": "命令: search/cat/cats/read/latest/home"}
+          args: {"type": "string", "description": "命令参数，如搜索关键词、分类名或词条URL"}
+        required: ["cmd"]
   - type: "function"
     function:
       name: "git_commit_only"

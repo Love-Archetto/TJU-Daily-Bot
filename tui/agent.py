@@ -20,6 +20,7 @@ from openai import OpenAI
 
 from .tools import (
     append_keyword,
+    get_tju_wiki_response,
     git_commit_only,
     git_commit_push,
     list_outputs,
@@ -49,6 +50,7 @@ TOOL_MAP = {
     "list_outputs": list_outputs,
     "open_report": open_report,
     "search": search,
+    "tju_wiki_query": get_tju_wiki_response,
     "git_commit_only": git_commit_only,
     "git_commit_push": git_commit_push,
 }

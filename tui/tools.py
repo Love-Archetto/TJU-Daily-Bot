@@ -239,6 +239,40 @@ def search(query: str, source: str | None = None) -> dict[str, Any]:
         return {"success": False, "results": [], "message": str(e)}
 
 
+def get_tju_wiki_response(cmd: str, args: str = "") -> dict[str, Any]:
+    """调用北洋维基查询工具 (tju_wiki.py), 返回查询文本.
+
+    Args:
+        cmd: search / cat / cats / read / latest / home 之一
+        args: 命令参数(如关键词、分类名、词条URL)
+
+    Returns:
+        {"success": bool, "reply": str, "message": str}
+    """
+    wiki_path = os.path.join(PROJECT_ROOT, "src", "tju_wiki.py")
+    if not os.path.exists(wiki_path):
+        return {"success": False, "reply": "", "message": "北洋维基脚本缺失 (src/tju_wiki.py)"}
+
+    argv = ["python", wiki_path, cmd]
+    if args:
+        # 拆成多参数(支持空格分隔, 如 read url / search 关键词 / cat 分类)
+        argv.extend(args.split())
+    # 强制子进程 UTF-8 输出，避免 emoji 在 GBK 终端/管道下报 UnicodeEncodeError
+    child_env = dict(os.environ)
+    child_env["PYTHONIOENCODING"] = "utf-8"
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=30,
+                              encoding="utf-8", errors="replace", env=child_env)
+        text = proc.stdout.strip()
+        if not text:
+            text = proc.stderr.strip() or "(无输出)"
+        return {"success": proc.returncode == 0, "reply": text, "message": text[:80]}
+    except subprocess.TimeoutExpired:
+        return {"success": False, "reply": "", "message": "北洋维基查询超时"}
+    except Exception as e:
+        return {"success": False, "reply": "", "message": f"查询失败: {e}"}
+
+
 def git_commit_only(message: str) -> dict[str, Any]:
     """仅提交不推送."""
     return commit_only(message)
