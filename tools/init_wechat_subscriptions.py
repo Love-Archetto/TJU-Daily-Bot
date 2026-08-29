@@ -27,11 +27,14 @@ SOURCES_PATH = PROJECT_ROOT / "config" / "sources.yaml"
 
 DEFAULT_USER = "admin"
 DEFAULT_PASS = "admin@123"
+# we-mp-rss 业务 API 根前缀（auth/mps 等挂在 API_BASE 下；RSS /feed 在裸路径）
+# 日志可见 API_BASE:/api/v1/wx
+API_PREFIX = "/api/v1/wx"
 
 
 def login(base: str, username: str, password: str) -> str:
     """登录 we-mp-rss, 返回 access token."""
-    url = f"{base}/auth/login"
+    url = f"{base}{API_PREFIX}/auth/login"
     # OAuth2 密码表单
     r = requests.post(url, data={"username": username, "password": password}, timeout=30)
     r.raise_for_status()
@@ -48,7 +51,7 @@ def _auth_headers(token: str) -> dict:
 
 def add_subscription(base: str, token: str, name: str, fakeid_b64: str) -> None:
     """添加一个公众号订阅. mp_id = base64 fakeid."""
-    url = f"{base}/mps"
+    url = f"{base}{API_PREFIX}/mps"
     payload = {
         "mp_name": name,
         "mp_id": fakeid_b64,   # we-mp-rss 内部会 base64 解码
