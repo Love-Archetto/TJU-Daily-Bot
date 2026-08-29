@@ -1,0 +1,4 @@
+请求微信公众平台首页: https://mp.weixin.qq.com/
+首页 HTTP 200 len=54529
+首页未提取到 loginqrcode(可能需先登录/或结构变化)
+  其它 loginqrcode 片段: []
