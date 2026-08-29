@@ -50,18 +50,33 @@ def main() -> None:
     out.append(f"feedparser entries 数量: {len(feed.entries)}")
     out.append("")
     for i, e in enumerate(feed.entries[: args.max_entries]):
-        out.append(f"--- entry #{i} ---")
+        out.append(f"--- 订阅项 #{i} ---")
         out.append(f"  id        : {getattr(e, 'id', '')!r}")
         out.append(f"  title     : {getattr(e, 'title', '')!r}")
         out.append(f"  link      : {getattr(e, 'link', '')!r}")
-        out.append(f"  author    : {getattr(e, 'author', '')!r}")
-        src = getattr(e, "source", None)
-        out.append(f"  source    : {getattr(src, 'title', '') if src else ''!r}")
-        out.append(f"  published : {getattr(e, 'published', '')!r}")
-        # 所有含 title/link 的额外字段（诊断用）
-        extra = {k: v for k, v in e.items() if "title" in k or "link" in k or "url" in k}
-        out.append(f"  相关字段  : { {k: (str(v)[:60]) for k, v in extra.items()} }")
         out.append("")
+
+    # === 关键：测试 /feed/{feed_id}.xml 是否返回真文章标题/链接 ===
+    out.append("=" * 60)
+    out.append("测试 /feed/{feed_id}.xml（应返回文章标题+完整链接）")
+    out.append("=" * 60)
+    test_feed_ids = [getattr(e, "id", "") for e in feed.entries if getattr(e, "id", "")]
+    if not test_feed_ids:
+        out.append("  (无订阅可测)")
+    else:
+        fid = test_feed_ids[0]
+        feed_url = f"{base}/feed/{fid}.xml?is_update=true&limit=5"
+        out.append(f"  请求: {feed_url}")
+        try:
+            r2 = requests.get(feed_url, timeout=60)
+            out.append(f"  HTTP {r2.status_code}")
+            f2 = feedparser.parse(r2.text)
+            out.append(f"  文章数: {len(f2.entries)}")
+            for j, en in enumerate(f2.entries[:5]):
+                out.append(f"    - title: {getattr(en, 'title', '')!r}")
+                out.append(f"      link : {getattr(en, 'link', '')!r}")
+        except requests.RequestException as e:
+            out.append(f"  请求异常: {e}")
 
     result = "\n".join(out)
     print(result)

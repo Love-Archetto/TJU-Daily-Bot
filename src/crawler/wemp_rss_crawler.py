@@ -1,19 +1,22 @@
-"""公众号 RSS 爬虫 — 从 we-mp-rss 服务拉取公众号文章聚合 RSS。
+"""公众号 RSS 爬虫 — 从 we-mp-rss 拉取公众号文章。
 
 背景：
-    we-mp-rss 是独立服务（本地 Docker 或 GitHub Actions service 容器），
-    它负责扫码授权微信读书、批量抓取公众号、维护订阅与去重、生成 RSS。
-    本模块只负责「拉取 we-mp-rss 生成的 RSS 并解析成统一文章结构」，
-    不再自己调微信 API（避免触发账号级风控 freq control）。
+    we-mp-rss 是独立服务（GitHub Actions service 容器），负责扫码授权微信读书、
+    批量抓取公众号、维护订阅与去重、生成 RSS 与文章接口。
+    本模块从 we-mp-rss 拉取「真正的文章」，不自己调微信 API。
 
-接口（we-mp-rss）：
-    GET /feed/{feed_id}  单个公众号 RSS
-    GET /rss/fresh       更新所有订阅并返回聚合 RSS（本模块使用）
+接口（we-mp-rss，均为裸路径，无需登录）：
+    GET /rss/fresh          更新订阅并返回订阅源列表（item 的 <id> 为 feed_id，即 MP_WXS_xxx）
+    GET /feed/{feed_id}.xml 单个公众号的文章 RSS（title=文章标题, link=完整链接）
     服务地址默认 http://localhost:8001，可用环境变量 WE_MP_RSS_BASE 覆盖
+
+注意：不要用 /rss/fresh 当文章源——它返回的是订阅源列表（title=公众号名, link=相对路径），
+      不含真正文章。必须遍历 /feed/{feed_id}.xml 拿文章。
 """
 
 import logging
 import os
+import time
 from datetime import datetime
 from typing import Any
 
@@ -22,7 +25,9 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-REQUEST_TIMEOUT = 30
+REQUEST_TIMEOUT = 40
+FEED_FETCH_INTERVAL = 3  # 每个 feed 之间的间隔秒数，避免 we-mp-rss 抓取过频
+PER_FEED_LIMIT = 20      # 每个公众号最多取多少篇文章
 # we-mp-rss 服务地址（本地默认 8001，Actions 里由 service 提供同地址）
 DEFAULT_BASE = os.environ.get("WE_MP_RSS_BASE", "http://localhost:8001")
 
@@ -53,18 +58,64 @@ def _parse_entry(entry) -> dict[str, Any]:
             except Exception:
                 pass
     return {
-        "title": getattr(entry, "title", ""),
-        "link": getattr(entry, "link", ""),
+        "title": getattr(entry, "title", "") or "",
+        "link": getattr(entry, "link", "") or "",
         "publish_time": publish_time,
-        "summary": getattr(entry, "summary", ""),
+        "summary": getattr(entry, "summary", "") or "",
     }
 
 
-def fetch_all_articles(base: str | None = None) -> list[dict[str, Any]]:
-    """从 we-mp-rss 拉取聚合 RSS（触发一次更新 + 返回所有文章）.
+def _discover_feed_ids(base: str) -> list[tuple[str, str]]:
+    """从 /rss/fresh 获取订阅列表，返回 [(feed_id, 公众号名), ...].
 
-    对每个公众号，feedparser 解析出的 entry 里的 source/author 视 we-mp-rss 而定，
-    无法区分时统一标为“公众号”；若 entry 有 source 字段则用之。
+    /rss/fresh 每项 id=MP_WXS_xxx、title=公众号名（仅作订阅源清单用）。
+    """
+    url = f"{base}/rss/fresh"
+    try:
+        resp = requests.get(url, timeout=REQUEST_TIMEOUT)
+        resp.encoding = "utf-8"
+        feed = feedparser.parse(resp.text)
+    except requests.RequestException as e:
+        logger.error("发现订阅源失败: %s", e)
+        return []
+
+    items = []
+    for entry in feed.entries:
+        fid = getattr(entry, "id", "") or ""
+        name = getattr(entry, "title", "") or ""
+        if fid:
+            items.append((fid, name))
+    logger.info("发现 %d 个已订阅公众号", len(items))
+    return items
+
+
+def _fetch_feed_articles(base: str, feed_id: str) -> list[dict[str, Any]]:
+    """请求单个公众号的文章 RSS（is_update=True 触发抓取）."""
+    url = f"{base}/feed/{feed_id}.xml?is_update=true&limit={PER_FEED_LIMIT}"
+    try:
+        resp = requests.get(url, timeout=REQUEST_TIMEOUT)
+        resp.encoding = "utf-8"
+        feed = feedparser.parse(resp.text)
+    except requests.RequestException as e:
+        logger.warning("抓取 feed %s 失败: %s", feed_id, e)
+        return []
+
+    if feed.bozo and not feed.entries:
+        logger.warning("feed %s 空/失败: %s", feed_id, feed.bozo_exception)
+        return []
+
+    articles = []
+    for entry in feed.entries:
+        arts = _parse_entry(entry)
+        # title 应为文章标题；若为空则退回公众号名（feed id 前缀）
+        if not arts["title"]:
+            arts["title"] = feed_id
+        articles.append(arts)
+    return articles
+
+
+def fetch_all_articles(base: str | None = None) -> list[dict[str, Any]]:
+    """从 we-mp-rss 拉取所有已订阅公众号的文章.
 
     Args:
         base: we-mp-rss 服务根地址，默认取环境变量 WE_MP_RSS_BASE 或 localhost:8001
@@ -73,26 +124,22 @@ def fetch_all_articles(base: str | None = None) -> list[dict[str, Any]]:
         [{"title","link","publish_time","summary","source"}, ...]
     """
     base = (base or get_base_url()).rstrip("/")
-    url = f"{base}/rss/fresh"
-    try:
-        resp = requests.get(url, timeout=REQUEST_TIMEOUT)
-        resp.encoding = "utf-8"
-        feed = feedparser.parse(resp.text)
-    except requests.RequestException as e:
-        logger.error("we-mp-rss feed request failed: %s", e)
+
+    # 1. 找所有已订阅公众号的 feed_id
+    sub_sources = _discover_feed_ids(base)
+    if not sub_sources:
+        logger.warning("未发现任何已订阅公众号（先运行订阅初始化）")
         return []
 
-    if feed.bozo and not feed.entries:
-        logger.warning("we-mp-rss feed empty/failed (%s): %s", url, feed.bozo_exception)
-        return []
-
+    # 2. 逐个 feed 拉文章
     articles = []
-    for entry in feed.entries:
-        arts = _parse_entry(entry)
-        # we-mp-rss 聚合 RSS 中作者/标签若可解析则作 source
-        source = getattr(entry, "author", "") or getattr(entry, "source", {}).get("title", "")
-        arts["source"] = source or "公众号"
-        articles.append(arts)
+    for idx, (feed_id, name) in enumerate(sub_sources):
+        items = _fetch_feed_articles(base, feed_id)
+        for a in items:
+            a["source"] = name or feed_id
+            articles.append(a)
+        if idx < len(sub_sources) - 1:
+            time.sleep(FEED_FETCH_INTERVAL)
 
-    logger.info("we-mp-rss: fetched %d articles", len(articles))
+    logger.info("we-mp-rss: fetched %d articles from %d feeds", len(articles), len(sub_sources))
     return articles
