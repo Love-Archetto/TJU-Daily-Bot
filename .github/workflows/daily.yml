@@ -59,7 +59,12 @@ jobs:
         env:
           WE_MP_RSS_BASE: http://localhost:8001
 
-      - run: python src/main.py
+      # main.py 末尾会 commit_and_push（CI=true），需先配 git 身份
+      - name: Run main pipeline
+        run: |
+          git config user.name "TJU Bot"
+          git config user.email "bot@tju.edu"
+          python src/main.py
         env:
           CI: true
           # we-mp-rss 服务地址（service 容器映射到宿主 8001）
