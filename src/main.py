@@ -36,7 +36,7 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 from src.crawler.web_crawler import fetch_articles_from_list_page
-from src.crawler.sogou_wechat_crawler import fetch_wechat_articles
+from src.crawler.weread_mp_crawler import fetch_wechat_articles
 from src.ai_engine.fault_tolerant_client import FaultTolerantClient
 from src.ai_engine.independent_checker import IndependentChecker
 from tui.local_git import commit_and_push
@@ -335,7 +335,73 @@ def main() -> None:
         result = commit_and_push(f"daily report {beijing_now().strftime('%Y-%m-%d')}")
         logger.info("CI push: %s", result)
 
+    # 12. 若当前为北京 6:00 窗口(6:00-6:59), 生成当日汇总文件
+    #     (daily.yml 每2h cron + 每日北京6:00 cron 触发同一 main.py, 据此区分)
+    bj_hour = beijing_now().hour
+    if bj_hour == 6:
+        summary_path = build_daily_summary()
+        logger.info("每日汇总已生成: %s", summary_path)
+
     logger.info("TJU Daily Bot finished.")
+
+
+def build_daily_summary() -> str | None:
+    """把 output/ 下今天生成的所有 2h 窗口报告合并成当日汇总(去重).
+
+    Returns:
+        汇总文件路径, 或 None
+    """
+    import re
+    today = beijing_now().strftime("%Y-%m-%d")
+    output_dir = os.path.join(PROJECT_ROOT, "..", "output")
+    summary_dir = os.path.join(output_dir, "summary")
+    os.makedirs(summary_dir, exist_ok=True)
+
+    seen_links = set()
+    seen_titles = set()
+    merged: list[dict] = []
+    today_reports = [f for f in os.listdir(output_dir)
+                     if f.startswith(today) and f.endswith(".md")]
+    today_reports.sort()
+
+    for fname in today_reports:
+        fpath = os.path.join(output_dir, fname)
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception:
+            continue
+        # 粗糙提取: 匹配 "### N. 标题" 或 "- **链接**: url" 行, 去重
+        for line in content.splitlines():
+            m = re.search(r"\- \*\*链接\*\*: \[.*\]\((https?://[^)]+)\)", line)
+            if m:
+                link = m.group(1)
+                if link not in seen_links:
+                    seen_links.add(link)
+                    merged.append({"link": link})
+            ti = re.search(r"^###\s+\d+\.\s+(.+)$", line)
+            if ti and ti.group(1) not in seen_titles:
+                seen_titles.add(ti.group(1))
+
+    summary_lines = [
+        f"# 天津大学每日信息汇总 · {today}",
+        "",
+        f"**生成时间(北京)**: {beijing_now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"**覆盖**: 距上次 6:00 以来的 {len(today_reports)} 个窗口更新",
+        "",
+        "---",
+    ]
+    if merged:
+        summary_lines += ["## 汇总链接"]
+        for i, it in enumerate(merged, 1):
+            summary_lines.append(f"{i}. {it['link']}")
+    else:
+        summary_lines.append("> 今日暂无汇总内容。")
+
+    summary_path = os.path.join(summary_dir, f"{today}.md")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(summary_lines))
+    return summary_path
 
 
 if __name__ == "__main__":

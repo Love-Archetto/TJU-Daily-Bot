@@ -1,10 +1,11 @@
 name: TJU Daily Bot
 on:
   schedule:
-    # 每天早上 6:00 北京时间 (UTC 22:00 前一天; GitHub cron 用 UTC，中国无夏令时恒定正确)
+    # 每 2 小时抓取 (UTC); main.py 按北京时间判断, 北京6:00那轮额外生成当日汇总
+    - cron: '0 */2 * * *'
+    # 每天早 6:00 北京时间 = UTC 22:00 (触发; main.py 检测北京6:00生成当日汇总)
     - cron: '0 22 * * *'
   workflow_dispatch:
-# 允许 GITHUB_TOKEN 写回仓库(output/ 和 state.json push 所需)
 permissions:
   contents: write
 jobs:
@@ -16,18 +17,15 @@ jobs:
         with:
           python-version: '3.10'
 
+      # 恢复微信读书登录态(weread.json, 由 scan_weread 手动扫码产生)
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/we-mp-rss-data
+          key: weread-cookie-cache
+          restore-keys: |
+            weread-cookie-cache-
+
       - run: pip install -r requirements.txt
-
-      # 装 Playwright + chromium(为扫码复刻测试; we-mp-rss 扫码靠真实浏览器)
-      - name: Setup Playwright
-        run: |
-          pip install playwright
-          python -m playwright install chromium
-        shell: bash
-
-      # 复刻 we-mp-rss wxLogin: 云端能否用 Playwright 生成登录二维码(判断 web 多篇是否可复活)
-      - name: Test we-mp-rss wxLogin (cloud)
-        run: python tools/test_wemp_wxlogin_cloud.py || true
 
       - name: Run main pipeline
         run: |
@@ -36,6 +34,8 @@ jobs:
           python src/main.py
         env:
           CI: true
+          # 公众号抓取用微信读书方案(读 weread.json 的 wr_* cookie)
+          WEREAD_SESSION_PATH: /tmp/we-mp-rss-data/weread.json
           # 测试样本: 公众号只抓前 5 个(为验证/调试; 全量时删掉或设更大)
           WECHAT_SAMPLE: 5
           # TJU 开源大模型平台（主模型 + 检查器）
@@ -49,8 +49,7 @@ jobs:
           set +e
           git config user.name "TJU Bot"
           git config user.email "bot@tju.edu"
-          # 兼容 output/ 或 state.json 尚未生成的首次运行
-          mkdir -p output
+          mkdir -p output output/summary
           [ -f state.json ] || echo '{}' > state.json
           git add output/ state.json 2>/dev/null || true
           if ! git diff --cached --quiet; then
