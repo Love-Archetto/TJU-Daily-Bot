@@ -111,8 +111,11 @@ def fetch_latest_article(cookie: str, book_id: str, timeout: int = 15) -> dict[s
         return None
     review_id = d.get("reviewId", "")
     title = d.get("title", "")
-    # reviewId = MP_WXS_<bookId>_<token>, 拼原文直链
-    link = f"https://mp.weixin.qq.com/s/{review_id.split('_')[-1]}"
+    # reviewId = MP_WXS_<bookId>_<token>; 微信读书 cover 的 token 用 "~" 表示
+    # base64url 的 "_"(URL-safe 变体), 拼真实 mp.weixin 短码前须还原为 "_"
+    # (带 ~ 的短码在 mp.weixin 打开报"参数错误", 改成 _ 即可打开)
+    token = review_id.split("_")[-1].replace("~", "_")
+    link = f"https://mp.weixin.qq.com/s/{token}"
     return {
         "title": title,
         "link": link,
