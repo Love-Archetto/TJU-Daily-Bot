@@ -32,8 +32,9 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
 REQUEST_TIMEOUT = 20
-# 每个公众号搜索后的间隔秒数，降低被搜狗限流的风险（搜狗对连续高频搜索会反爬）
-QUERY_INTERVAL = 6.0
+# 每个公众号搜索后的间隔秒数(搜狗反爬经验约 3s; 我们取 3~5 随机, 降低规律性)
+QUERY_INTERVAL_MIN = 3.0
+QUERY_INTERVAL_MAX = 5.0
 # 触发反爬时的等待重试间隔与最大重试次数
 RATE_LIMIT_WAIT = 15.0
 RATE_LIMIT_RETRIES = 2
@@ -42,21 +43,50 @@ MAX_PER_ACCOUNT = 10
 
 
 class SogouWechatCrawler:
-    """搜狗微信搜索结果抓取."""
+    """搜狗微信搜索结果抓取.
+
+    反爬应对(参考 scrapy 反爬经验: 每次请求前从搜狗子域拿新 cookies + 随机 UA,
+    避免长期用同一 Session 的同一组 cookies 被识别)。
+    """
 
     def __init__(self):
         self.session = requests.Session()
-        self.session.headers.update({
+        self._seed_session_cookies()
+
+    def _seed_session_cookies(self) -> None:
+        """先从搜狗子域(v.sogou.com)拿一组初始 cookies, 降低首搜被拦概率."""
+        try:
+            r = self.session.get(
+                "https://v.sogou.com/v?ie=utf8&query=&p=40030600",
+                headers={"User-Agent": UA, "Referer": "https://www.sogou.com/"},
+                allow_redirects=False, timeout=15,
+            )
+            # 只保留 set-cookie; 不强制, 失败也继续
+        except requests.RequestException as e:
+            logger.info("获取搜狗初始 cookies 失败(继续): %s", e)
+
+    def _new_session(self) -> requests.Session:
+        """每次搜索新建一个承载新 cookies 的请求(带随机 UA 用固定 UA 亦可)."""
+        s = requests.Session()
+        s.headers.update({
             "User-Agent": UA,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9",
         })
+        # 从搜狗子域预热 cookies(每步换, 让搜狗认为是不同会话)
+        try:
+            s.get("https://v.sogou.com/v?ie=utf8&query=&p=40030600",
+                  headers={"User-Agent": UA}, allow_redirects=False, timeout=15)
+        except requests.RequestException:
+            pass
+        return s
 
     def _search(self, keyword: str) -> str | None:
-        """发一次搜狗微信搜索，返回 HTML；失败/反爬返回 None."""
+        """发一次搜狗微信搜索(每次新会话), 返回 HTML；失败/反爬返回 None."""
+        session = self._new_session()
         params = {"type": "2", "query": keyword, "ie": "utf8"}
         try:
-            resp = self.session.get(SEARCH_URL, params=params, timeout=REQUEST_TIMEOUT)
+            resp = session.get(SEARCH_URL, params=params, timeout=REQUEST_TIMEOUT)
             resp.encoding = resp.apparent_encoding or "utf-8"
             html = resp.text
             if "验证码" in html or "antispider" in html or "安全验证" in html:
@@ -131,11 +161,12 @@ class SogouWechatCrawler:
 
     def fetch_all(self, account_names: list[str]) -> list[dict[str, Any]]:
         """抓取多个公众号名的文章，汇总."""
+        import random
         all_articles = []
         for i, name in enumerate(account_names):
             all_articles.extend(self.fetch_account(name))
             if i < len(account_names) - 1:
-                time.sleep(QUERY_INTERVAL)
+                time.sleep(random.uniform(QUERY_INTERVAL_MIN, QUERY_INTERVAL_MAX))
         logger.info("搜狗抓取共 %d 篇来自 %d 个公众号", len(all_articles), len(account_names))
         return all_articles
 
