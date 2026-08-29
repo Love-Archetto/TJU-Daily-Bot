@@ -28,10 +28,9 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 from src.crawler.web_crawler import fetch_articles_from_list_page
-from src.crawler.mp_wechat_crawler import fetch_all_wechat
+from src.crawler.wemp_rss_crawler import fetch_all_articles as fetch_wemp_all, healthy as wemp_healthy
 from src.ai_engine.fault_tolerant_client import FaultTolerantClient
 from src.ai_engine.independent_checker import IndependentChecker
-from src.notifier import send_cookie_expired_alert
 from tui.local_git import commit_and_push
 from tui.search_handler import SearchHandler
 
@@ -238,10 +237,9 @@ def main() -> None:
     now = datetime.now().isoformat()
     is_ci = os.environ.get("CI", "").lower() == "true"
 
-    # 2. 加载信源，抓取网站 + 公众号（公众号统一批量抓取，纯远程 MP API）
+    # 2. 加载信源，抓取网站 + 公众号（公众号经 we-mp-rss 拉 RSS）
     sources = load_sources()
     all_articles = []
-    cookie_expired = False
     fetch_summary = {}
 
     for source in sources:
@@ -259,29 +257,18 @@ def main() -> None:
             fetch_summary[source_name] = len(articles)
             state["source_last_fetch"][source_name] = now
 
-    # 3. 公众号批量抓取（MP API 优先，RSSHub 降级；纯远程，CI 亦可运行）
+    # 3. 公众号批量抓取（从 we-mp-rss 拉聚合 RSS；服务地址默认 localhost:8001，
+    #    可用环境变量 WE_MP_RSS_BASE 覆盖，Actions 里指向 service 容器）
     gzh_sources = [x for x in sources if x.get("type") == "wechat_rss"]
     if gzh_sources:
-        mp_cookie = os.environ.get("WEREAD_COOKIE", "")
-        mp_token = os.environ.get("MP_QUERY_TOKEN", "")
-        if not mp_cookie or not mp_token:
-            logger.warning("未配置 WEREAD_COOKIE / MP_QUERY_TOKEN，跳过公众号抓取")
+        if not wemp_healthy():
+            logger.warning("we-mp-rss 服务不可达，跳过公众号抓取")
         else:
-            wechat_result = fetch_all_wechat(mp_cookie, mp_token)
-            all_articles.extend(wechat_result["articles"])
-            cookie_expired = wechat_result["cookie_expired"]
-            fetch_summary["wechat_total"] = len(wechat_result["articles"])
-            fetch_summary["wechat_status"] = wechat_result["status_counts"]
+            wechat_articles = fetch_wemp_all()
+            all_articles.extend(wechat_articles)
+            fetch_summary["wechat_total"] = len(wechat_articles)
             for name in [x.get("name") for x in gzh_sources]:
                 state["source_last_fetch"][name] = now
-
-            # Cookie 过期 → 立即邮件通知用户更新 Secret
-            if cookie_expired:
-                logger.error("Cookie 已过期，发送告警邮件")
-                send_cookie_expired_alert(
-                    wechat_result["cookie_expired_count"],
-                    detail=f"状态分布: {wechat_result['status_counts']}",
-                )
 
     # 3. 增量过滤
     new_articles = [a for a in all_articles if is_new_article(a, state)]

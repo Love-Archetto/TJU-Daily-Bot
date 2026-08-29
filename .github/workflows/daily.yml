@@ -6,26 +6,62 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # we-mp-rss service 容器：负责扫码授权微信读书、批量抓取公众号、生成 RSS
+    services:
+      we-mp-rss:
+        image: rachelos/we-mp-rss:latest
+        ports:
+          - 8001:8001
+        volumes:
+          - /tmp/we-mp-rss-data:/app/data
+        env:
+          USERNAME: admin
+          PASSWORD: admin@123
+        options: >-
+          --health-cmd "curl -sf http://localhost:8001/ || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 3
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
         with:
           python-version: '3.10'
+
+      # 恢复上次积累的 we-mp-rss 数据（订阅配置、登录态、已积累文章）。
+      # GitHub Actions 每次 job 是全新环境，不缓存则容器每次是空库，公众号抓取无意义。
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/we-mp-rss-data
+          key: we-mp-rss-data-${{ github.run_id }}
+          restore-keys: |
+            we-mp-rss-data-
+
       - run: pip install -r requirements.txt
+
+      # 等待 we-mp-rss 就绪（health check 可能起不齐，额外拉一个就绪等待）
+      - name: Wait for we-mp-rss
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8001/ >/dev/null 2>&1; then
+              echo "we-mp-rss ready"
+              break
+            fi
+            echo "waiting we-mp-rss... ($i)"
+            sleep 5
+          done
+
       - run: python src/main.py
         env:
           CI: true
+          # we-mp-rss 服务地址（service 容器映射到宿主 8001）
+          WE_MP_RSS_BASE: http://localhost:8001
           # TJU 开源大模型平台（主模型 + 检查器）
           TJU_API_KEY: ${{ secrets.TJU_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
-          # 微信公众号抓取（纯远程 MP API 方案）
-          WEREAD_COOKIE: ${{ secrets.WEREAD_COOKIE }}
-          MP_QUERY_TOKEN: ${{ secrets.MP_QUERY_TOKEN }}
-          # 每个公众号抓取间隔秒数（微信频控严格建议 ≥6，可选）
-          MP_DELAY_SECONDS: ${{ secrets.MP_DELAY_SECONDS || 6 }}
-          # 邮件告警（Cookie 过期时通知）
+          # 邮件告警（we-mp-rss 数据异常时可选使用）
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_TLS: ${{ secrets.SMTP_TLS }}
@@ -33,6 +69,7 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
           NOTIFY_TO: ${{ secrets.NOTIFY_TO }}
+
       - name: Push output/ and state.json
         run: |
           set +e
@@ -49,3 +86,6 @@ jobs:
           else
             echo "No changes to commit"
           fi
+```
+
+Note: `/tmp/we-mp-rss-data` is under `/tmp` which persists only during the job, but `actions/cache` saves it at job end in the post-step and restores at start — so accumulation survives across runs via the cache. On the very first run, the service starts with an empty `/tmp/we-mp-rss-data` (no subscriptions, no auth) — that's expected; it needs one manual seed (see local init guide).
