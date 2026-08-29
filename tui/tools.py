@@ -14,8 +14,7 @@ from typing import Any
 
 import yaml
 
-from .local_git import commit_and_push, commit_only, get_output_files
-from .search_handler import SearchHandler
+from .local_git import commit_and_push, commit_only, get_output_files, pull_latest
 
 logger = logging.getLogger(__name__)
 
@@ -179,26 +178,63 @@ def open_report(filename: str) -> dict[str, Any]:
 
 
 def search(query: str, source: str | None = None) -> dict[str, Any]:
-    """搜索已抓取内容.
+    """在历史 output 报告中全文搜索.
+
+    策略：
+    1. 搜索前自动 git pull，把云端累积的历史报告同步到本地,保证 output/ 是完整的。
+    2. 遍历 output/*.md，用关键词做全文匹配（大小写不敏感）。
+    3. 命中则返回报告文件名、匹配行及上下文。
 
     Args:
-        query: 搜索关键词
-        source: 限定信源名称（可选）
+        query: 搜索关键词（支持空格分隔多词,需全部命中）
+        source: 保留参数（兼容），当前忽略按信源过滤，改为全文搜
 
     Returns:
         {"success": bool, "results": [...], "message": str}
     """
     try:
-        handler = SearchHandler()
-        results = handler.search(query, source)
-        if not results:
-            # 降级提示
-            return {
-                "success": True,
-                "results": [],
-                "message": f"No results found for '{query}'",
-            }
-        return {"success": True, "results": results, "message": f"{len(results)} results"}
+        # 1. 先同步历史报告
+        pull_result = pull_latest()
+        if not pull_result.get("success"):
+            logger.warning("搜索前 git pull 失败（继续搜本地现有报告）: %s", pull_result.get("message"))
+
+        # 2. 全文搜 output/
+        output_dir = os.path.join(PROJECT_ROOT, "output")
+        if not os.path.isdir(output_dir):
+            return {"success": True, "results": [], "message": "output/ 目录不存在,暂无历史报告可搜索"}
+
+        keywords = [k.lower() for k in query.split() if k.strip()]
+        hits = []
+        for fname in sorted(os.listdir(output_dir), reverse=True):
+            if not fname.endswith(".md"):
+                continue
+            fpath = os.path.join(output_dir, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+            except Exception as e:
+                logger.warning("读取报告失败 %s: %s", fname, e)
+                continue
+            # 逐行匹配
+            matched = []
+            for i, line in enumerate(lines):
+                low = line.lower()
+                if all(kw in low for kw in keywords):
+                    matched.append({
+                        "line": i + 1,
+                        "text": line.strip()[:120],
+                    })
+            if matched:
+                hits.append({
+                    "file": fname,
+                    "matches": matched[:5],   # 每文件最多保留 5 个命中行,避免过载
+                    "total": len(matched),
+                })
+
+        if not hits:
+            return {"success": True, "results": [], "message": f"在历史报告中未找到 '{query}'"}
+        return {"success": True, "results": hits, "message": f"在 {len(hits)} 份历史报告中找到相关内容"}
+
     except Exception as e:
         return {"success": False, "results": [], "message": str(e)}
 

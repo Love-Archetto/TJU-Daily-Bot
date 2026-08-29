@@ -130,16 +130,15 @@ class TjuTuiApp(App):
             chat_log.write("[bold yellow]⚠️ 未检测到 .env 文件[/bold yellow]")
             chat_log.write("  请执行: cp .env.example .env 并填入 API 密钥")
 
-        # 检查 we-mp-rss 服务
-        try:
-            from src.crawler.wechat_rss_crawler import check_service_health
-            if not check_service_health():
-                chat_log.write("[bold yellow]⚠️ we-mp-rss 服务未启动[/bold yellow]")
-                chat_log.write("  请执行: docker-compose up -d")
-            else:
-                chat_log.write("[green]✅ we-mp-rss 服务正常[/green]")
-        except Exception:
-            pass
+        # 提示公众号数据来源：本地不跑 we-mp-rss，公众号内容来自云端 Actions 生成的历史报告
+        output_dir = os.path.join(os.path.dirname(__file__), "..", "output")
+        repo_has_reports = os.path.isdir(output_dir) and any(
+            f.endswith(".md") for f in os.listdir(output_dir)
+        )
+        if not repo_has_reports:
+            chat_log.write("[yellow]📭 本地暂无历史报告[/yellow]")
+            chat_log.write("  公众号内容由 GitHub Actions 定时生成并 push（output/ 下 .md）。")
+            chat_log.write("  使用「搜索」前建议先 git pull 同步最新历史报告。")
 
         # 检查历史文件
         history_dir = os.path.join(os.path.dirname(__file__), "..", "history")
