@@ -41,9 +41,9 @@ jobs:
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
           NOTIFY_TO: ${{ secrets.NOTIFY_TO }}
 
-      # 验证: 用捉到的新鲜会话 + appmsgpublish 抓公众号(实时日志, 短退避便于快速反馈)
+      # 验证: 严格复刻 web.py(session+verify=False+完整headers)+appmsgpublish, 换确定存在的号测
       - name: Test fetch with session
-        run: python tools/fetch_gzh_test.py --limit 3 --interval 3 --backoff 8 || true
+        run: python tools/fetch_gzh_test.py --limit 3 --interval 3 --backoff 8 --accounts "天大官微,天外天,天大就业" || true
 
       # 存缓存(会话), 供主 daily 恢复
       - uses: actions/cache@v4
