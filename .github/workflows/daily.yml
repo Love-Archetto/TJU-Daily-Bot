@@ -20,11 +20,9 @@ jobs:
           # 微信读书采集模式：用 WEREAD_COOKIE 抓公众号（替代扫码）
           GATHER.MODEL: weread_mp
           WEREAD_COOKIE: ${{ secrets.WEREAD_COOKIE }}
-        options: >-
-          --health-cmd "curl -sf http://localhost:8001/ || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 3
+        # 注意：不要在该容器上配置 --health-cmd（we-mp-rss 镜像内无 curl，
+        # 会导致 healthcheck 一直 unhealthy 而被 GitHub 判定容器启动失败）。
+        # 服务就绪等待改由下方 "Wait for we-mp-rss" 宿主 bash get 检测负责。
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
