@@ -27,7 +27,6 @@ from textual.reactive import reactive
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tui.agent import Agent
-from tui.local_git import commit_and_push, commit_only, get_output_files
 from tui.tools import list_outputs, open_report
 
 # 命令白名单
@@ -90,8 +89,6 @@ class TjuTuiApp(App):
                 yield Static("📁 报告列表", id="file-title")
                 yield ListView(id="file-list")
         with Horizontal(id="button-bar"):
-            yield Button("仅Commit", id="btn-commit-only", variant="default")
-            yield Button("Commit & Push", id="btn-commit-push", variant="primary")
             yield Button("仅Save", id="btn-save", variant="default")
             yield Button("退出", id="btn-quit", variant="error")
         yield Footer()
@@ -190,15 +187,7 @@ class TjuTuiApp(App):
         chat_log = self.query_one("#chat-log", RichLog)
         button_id = event.button.id
 
-        if button_id == "btn-commit-only":
-            result = commit_only("save session")
-            chat_log.write(f"[dim]📦 {result['message']}[/dim]")
-
-        elif button_id == "btn-commit-push":
-            result = commit_and_push("save session")
-            chat_log.write(f"[dim]📤 {result['message']}[/dim]")
-
-        elif button_id == "btn-save":
+        if button_id == "btn-save":
             filename = self.agent.save_history()
             if filename:
                 chat_log.write(f"[dim]💾 对话已保存: {filename}[/dim]")
@@ -207,8 +196,7 @@ class TjuTuiApp(App):
 
         elif button_id == "btn-quit":
             self.agent.save_history()
-            result = commit_and_push("session end")
-            chat_log.write(f"[dim]📤 {result['message']}[/dim]")
+            chat_log.write("[dim]👋 已保存对话，退出 TUI[/dim]")
             self.exit()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -275,8 +263,7 @@ class TjuTuiApp(App):
 
         elif command == "/quit":
             self.agent.save_history()
-            result = commit_and_push("session end")
-            chat_log.write(f"[dim]📤 {result['message']}[/dim]")
+            chat_log.write("[dim]👋 已保存对话，退出 TUI[/dim]")
             self.exit()
 
 
