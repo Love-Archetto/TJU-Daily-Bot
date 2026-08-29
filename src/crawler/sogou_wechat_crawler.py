@@ -32,8 +32,11 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
 REQUEST_TIMEOUT = 20
-# 每个公众号搜索后的间隔秒数，降低被搜狗限流的风险
-QUERY_INTERVAL = 3.0
+# 每个公众号搜索后的间隔秒数，降低被搜狗限流的风险（搜狗对连续高频搜索会反爬）
+QUERY_INTERVAL = 6.0
+# 触发反爬时的等待重试间隔与最大重试次数
+RATE_LIMIT_WAIT = 15.0
+RATE_LIMIT_RETRIES = 2
 # 每个公众号最多解析多少篇
 MAX_PER_ACCOUNT = 10
 
@@ -97,8 +100,16 @@ class SogouWechatCrawler:
             return None
 
     def fetch_account(self, name: str) -> list[dict[str, Any]]:
-        """抓取单个公众号名的近期文章."""
-        html = self._search(name)
+        """抓取单个公众号名的近期文章，触发反爬时等待后重试."""
+        html = None
+        for attempt in range(RATE_LIMIT_RETRIES + 1):
+            html = self._search(name)
+            if html is not None:
+                break
+            if attempt < RATE_LIMIT_RETRIES:
+                logger.warning("搜狗[%s] 触发反爬，等待 %.0fs 后重试 (%d/%d)",
+                               name, RATE_LIMIT_WAIT, attempt + 1, RATE_LIMIT_RETRIES)
+                time.sleep(RATE_LIMIT_WAIT)
         if not html:
             return []
         raw_items = self._parse_results(html)[:MAX_PER_ACCOUNT]
