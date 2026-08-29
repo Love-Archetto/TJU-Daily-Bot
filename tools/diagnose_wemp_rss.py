@@ -60,23 +60,25 @@ def main() -> None:
     out.append("=" * 60)
     out.append("测试 /feed/{feed_id}.xml（应返回文章标题+完整链接）")
     out.append("=" * 60)
-    test_feed_ids = [getattr(e, "id", "") for e in feed.entries if getattr(e, "id", "")]
-    if not test_feed_ids:
-        out.append("  (无订阅可测)")
+    # 用 sources.yaml 的 fakeid 构造正确 feed_id（避免 /rss/fresh 的 rss/ 前缀 id）
+    sys.path.insert(0, str(PROJECT_ROOT))
+    from src.crawler.wemp_rss_crawler import _discover_feed_ids
+    subs = _discover_feed_ids(base)
+    if not subs:
+        out.append("  (sources.yaml 无订阅可测)")
     else:
-        fid = test_feed_ids[0]
-        feed_url = f"{base}/feed/{fid}.xml?is_update=true&limit=5"
-        out.append(f"  请求: {feed_url}")
-        try:
-            r2 = requests.get(feed_url, timeout=60)
-            out.append(f"  HTTP {r2.status_code}")
-            f2 = feedparser.parse(r2.text)
-            out.append(f"  文章数: {len(f2.entries)}")
-            for j, en in enumerate(f2.entries[:5]):
-                out.append(f"    - title: {getattr(en, 'title', '')!r}")
-                out.append(f"      link : {getattr(en, 'link', '')!r}")
-        except requests.RequestException as e:
-            out.append(f"  请求异常: {e}")
+        for fid, name in subs[:3]:
+            feed_url = f"{base}/feed/{fid}.xml?is_update=true&limit=5"
+            out.append(f"  订阅: {name} -> {fid}")
+            try:
+                r2 = requests.get(feed_url, timeout=60)
+                f2 = feedparser.parse(r2.text)
+                out.append(f"    HTTP {r2.status_code} 文章数: {len(f2.entries)}")
+                for j, en in enumerate(f2.entries[:3]):
+                    out.append(f"      - title: {getattr(en, 'title', '')!r}")
+                    out.append(f"        link : {getattr(en, 'link', '')!r}")
+            except requests.RequestException as e:
+                out.append(f"    请求异常: {e}")
 
     result = "\n".join(out)
     print(result)

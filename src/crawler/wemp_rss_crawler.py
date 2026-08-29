@@ -14,6 +14,7 @@
       不含真正文章。必须遍历 /feed/{feed_id}.xml 拿文章。
 """
 
+import base64
 import logging
 import os
 import time
@@ -22,6 +23,7 @@ from typing import Any
 
 import feedparser
 import requests
+import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -65,27 +67,43 @@ def _parse_entry(entry) -> dict[str, Any]:
     }
 
 
-def _discover_feed_ids(base: str) -> list[tuple[str, str]]:
-    """从 /rss/fresh 获取订阅列表，返回 [(feed_id, 公众号名), ...].
+def _fakeid_to_feed_id(fakeid: str) -> str:
+    """把 base64 fakeid 转成 we-mp-rss 的 feed_id.
 
-    /rss/fresh 每项 id=MP_WXS_xxx、title=公众号名（仅作订阅源清单用）。
+    we-mp-rss 添加订阅时用 base64 fakeid(如 MjM5NzkwNzU0Mg==)，内部解码为数字 id
+    并生成 feed；其 RSS 地址为 /feed/MP_WXS_{解码id}.xml。
     """
-    url = f"{base}/rss/fresh"
     try:
-        resp = requests.get(url, timeout=REQUEST_TIMEOUT)
-        resp.encoding = "utf-8"
-        feed = feedparser.parse(resp.text)
-    except requests.RequestException as e:
-        logger.error("发现订阅源失败: %s", e)
+        decoded = base64.b64decode(fakeid).decode("utf-8")
+    except Exception:
+        decoded = fakeid
+    return f"MP_WXS_{decoded}"
+
+
+def _discover_feed_ids(base: str) -> list[tuple[str, str]]:
+    """从 config/sources.yaml 直接构造订阅的 (feed_id, 公众号名)，不依赖 /rss/fresh.
+
+    注意：/rss/fresh 的 <id> 常带 rss/ 前缀且与真实 feed_id 不一致，改用 sources.yaml
+    的 fakeid 构造更可靠（与 we-mp-rss 添加订阅时生成的 feed id 一致）。
+    """
+    sources_path = os.path.join(os.path.dirname(__file__), "..", "..", "config", "sources.yaml")
+    try:
+        with open(sources_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except Exception as e:
+        logger.error("读取 sources.yaml 失败: %s", e)
         return []
 
     items = []
-    for entry in feed.entries:
-        fid = getattr(entry, "id", "") or ""
-        name = getattr(entry, "title", "") or ""
-        if fid:
-            items.append((fid, name))
-    logger.info("发现 %d 个已订阅公众号", len(items))
+    for s in data.get("sources", []):
+        if s.get("type") != "wechat_rss":
+            continue
+        fakeid = s.get("fakeid", "") or ""
+        if not fakeid:
+            continue
+        fid = _fakeid_to_feed_id(fakeid)
+        items.append((fid, s.get("name", fid)))
+    logger.info("从 sources.yaml 构造 %d 个订阅", len(items))
     return items
 
 
