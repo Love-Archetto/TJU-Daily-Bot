@@ -1,18 +1,25 @@
 sources:
-- name: 天大官网-通知公告
+# ===== 网站信源（公网可达，云端可抓）=====
+- name: 天大新闻网
   type: web
-  url: https://www.tju.edu.cn/tzgg/
+  url: https://news.tju.edu.cn/xw/xsx.htm
   selectors:
-    title: h2 a
-    link: h2 a
-    time: .date
-- name: 天大教务处
+    item_container: "li:has(a[href*='/info/'])"
+- name: 天大智能与计算学部-通知
   type: web
-  url: https://jwc.tju.edu.cn/tzgg/
+  url: https://cic.tju.edu.cn/xwzx/tzgg.htm
   selectors:
-    title: .list-title a
-    link: .list-title a
-    time: .list-time
+    item_container: "li:has(a[href*='/info/'])"
+- name: 天大计算机学院-通知
+  type: web
+  url: https://cs.tju.edu.cn/xwgg/notices.htm
+  selectors:
+    item_container: "li:has(a[href*='/info/'])"
+- name: 天大人事处-通知
+  type: web
+  url: https://hr.tju.edu.cn/tzgg.htm
+  selectors:
+    item_container: "li:has(a[href*='/info/'])|li:has(a[href^='tzgg/'])"
 - name: 天大官微
   type: wechat_rss
   rss_url: http://localhost:4000/feed/天津大学

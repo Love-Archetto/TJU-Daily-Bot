@@ -54,7 +54,11 @@ def fetch_articles_from_list_page(url: str, selectors: dict[str, str]) -> list[d
 
     Args:
         url: 列表页 URL
-        selectors: 形如 {"title": "h2 a", "link": "h2 a", "time": ".date"} 的选择器字典
+        selectors: 支持两种模式
+          - 通用 CMS 模式(天大各部门官网常用): {"item_container": "li.list-item"} 或
+            {"item_container": "li"}, 从每个 li 的 <a href*='/info/'> 提取标题+链接,
+            从 li 文本提取日期。
+          - 传统模式: {"title": "h2 a", "link": "h2 a", "time": ".date"}
 
     Returns:
         [{"title":..., "link":..., "publish_time":...}, ...]
@@ -65,14 +69,37 @@ def fetch_articles_from_list_page(url: str, selectors: dict[str, str]) -> list[d
         return []
 
     soup = BeautifulSoup(resp.text, "html.parser")
+    articles: list[dict[str, Any]] = []
 
+    # 通用 CMS 模式优先
+    item_container = selectors.get("item_container")
+    if item_container:
+        items = soup.select(item_container)
+        for it in items:
+            # 优先 /info/ 的文章链接
+            a_el = it.select_one('a[href*="/info/"]') or it.select_one("a")
+            if a_el is None:
+                continue
+            title = a_el.get_text(strip=True)
+            if not title:
+                continue
+            link = a_el.get("href", "")
+            if link and not link.startswith("http"):
+                link = urljoin(url, link)
+            publish_time = _extract_date(it.get_text(" ")) or _extract_date(title)
+            articles.append({
+                "title": title,
+                "link": link,
+                "publish_time": publish_time,
+            })
+        logger.info("Fetched %d articles (CMS-mode) from %s", len(articles), url)
+        return articles
+
+    # 传统 title/link/time 模式
     title_sel = selectors.get("title", "a")
     link_sel = selectors.get("link", "a")
     time_sel = selectors.get("time", "")
 
-    articles: list[dict[str, Any]] = []
-
-    # 找到所有标题元素，以此为锚点遍历
     title_elements = soup.select(title_sel)
     for el in title_elements:
         title = el.get_text(strip=True)
@@ -82,7 +109,6 @@ def fetch_articles_from_list_page(url: str, selectors: dict[str, str]) -> list[d
         if link and not link.startswith("http"):
             link = urljoin(url, link)
 
-        # 时间元素：尝试在同级或父级中查找
         publish_time = ""
         if time_sel:
             time_el = el.find_parent("li") or el.find_parent("div")
@@ -103,3 +129,12 @@ def fetch_articles_from_list_page(url: str, selectors: dict[str, str]) -> list[d
 
     logger.info("Fetched %d articles from %s", len(articles), url)
     return articles
+
+
+def _extract_date(text: str) -> str:
+    """从文本中提取第一个日期(YYYY-MM-DD 或 YYYY-M-D 等)."""
+    import re
+    m = re.search(r"(\d{4}[-/\.]\d{1,2}[-/\.]\d{1,2})", text)
+    if m:
+        return m.group(1).replace("/", "-").replace(".", "-")
+    return ""
