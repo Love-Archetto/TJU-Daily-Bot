@@ -101,16 +101,26 @@ async def main():
                            "请用手机微信扫码登录微信读书。扫码后本轮自动同步 wr_* cookie。",
                            image_path=str(img_path))
                 out.append("已发码到邮箱")
-                # 等扫码(轮询 page 内容/URL 变化或 120s)
-                for _ in range(120):
+                # 等扫码(轮询 wr_* cookie 出现或 120s)
+                for _ in range(150):
                     await page.wait_for_timeout(2000)
-                    # 扫码后 wr_* cookie 应出现
                     cookies = await ctx.cookies()
                     if any(c["name"].startswith("wr_") for c in cookies):
                         out.append("✅ 检测到 wr_* cookie, 登录成功")
                         break
                 else:
-                    out.append("⚠️ 120s 未检测到 wr_* cookie(可能未扫码/登录方式不同)")
+                    out.append("⚠️ 120s 未检测到 wr_* cookie(可能未扫码)")
+
+                # 扫码后可能需要刷新/导航才能让 wr_vid/wr_skey 全量设置
+                # 先 refresh 首页, 再尝试访问需登录的接口触发完整 set-cookie
+                try:
+                    await page.goto(WEREAD_URL, wait_until="domcontentloaded", timeout=30000)
+                    await page.wait_for_timeout(3000)
+                    out.append("已刷新首页以触发完整 cookie")
+                except Exception as e:
+                    out.append(f"刷新首页异常: {e}")
+                # 再强刷一次 cookie 集合
+                cookies = await ctx.cookies()
             else:
                 out.append("未找到二维码元素(可能未弹出登录弹窗/布局不同)")
                 # 诊断: 截图 + 页面文本, 供下轮定位
