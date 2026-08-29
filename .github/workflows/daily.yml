@@ -1,10 +1,10 @@
 name: TJU Daily Bot
 on:
   schedule:
-    # 每 2 小时抓取 (UTC); main.py 按北京时间判断, 北京6:00那轮额外生成当日汇总
+    # 每 2 小时 (UTC) = 北京时间 0/2/4/6/.../22 偶数点。
+    # UTC 偶数点 ±8 仍是偶数点, 故 0 */2 (UTC) 天然对齐北京偶数整点。
+    # 北京 6:00 = UTC 22:00, 已含在此调度内, 由 main.py 检测 bj_hour==6 生成当日汇总。
     - cron: '0 */2 * * *'
-    # 每天早 6:00 北京时间 = UTC 22:00 (触发; main.py 检测北京6:00生成当日汇总)
-    - cron: '0 22 * * *'
   workflow_dispatch:
 permissions:
   contents: write
