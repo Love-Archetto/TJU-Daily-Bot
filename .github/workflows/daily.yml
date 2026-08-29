@@ -96,6 +96,3 @@ jobs:
           else
             echo "No changes to commit"
           fi
-```
-
-Note: `/tmp/we-mp-rss-data` is under `/tmp` which persists only during the job, but `actions/cache` saves it at job end in the post-step and restores at start — so accumulation survives across runs via the cache. On the very first run, the service starts with an empty `/tmp/we-mp-rss-data` (no subscriptions, no auth) — that's expected; it needs one manual seed (see local init guide).
