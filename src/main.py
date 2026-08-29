@@ -365,6 +365,8 @@ def main() -> None:
 
     if not new_articles:
         logger.info("No new articles, skipping report generation")
+        # 即便本轮无新文章, 北京6点仍要出当日汇总(可能当天已有历史报告)
+        _maybe_daily_summary()
         return
 
     # 4. 加载关键词和用户画像
@@ -422,25 +424,36 @@ def main() -> None:
         result = commit_and_push(f"daily report {beijing_now().strftime('%Y-%m-%d')}")
         logger.info("CI push: %s", result)
 
-    # 12. 若当前为北京 6:00 窗口(6:00-6:59), 生成当日汇总文件并邮件发送
-    bj_hour = beijing_now().hour
-    if bj_hour == 6:
+    # 12. 若本轮是北京6:00窗口, 生成当日汇总并发邮件(独立于本轮有无新文章)
+    _maybe_daily_summary()
+
+    logger.info("TJU Daily Bot finished.")
+
+
+def _maybe_daily_summary() -> str | None:
+    """若当前为北京 6:00 窗口(6:00-6:59), 生成当日汇总并邮件发送.
+
+    独立于"本轮有无新文章": 只要当日 output/ 已有报告(哪怕本轮无新),
+    也在北京6点汇总当日内容。非6点窗口直接返回 None(不做任何事)。
+    """
+    if beijing_now().hour != 6:
+        return None
+    try:
         summary_path = build_daily_summary()
         logger.info("每日汇总已生成: %s", summary_path)
         if summary_path and os.path.exists(summary_path):
-            try:
-                with open(summary_path, "r", encoding="utf-8") as f:
-                    summary_text = f.read()
-                from src.notifier import send_alert
-                ok = send_alert(
-                    f"📰 TJU Daily Bot 每日汇总 · {beijing_now().strftime('%Y-%m-%d')}",
-                    summary_text,
-                )
-                logger.info("每日汇总邮件发送: %s", "成功" if ok else "失败(检查SMTP)")
-            except Exception as e:
-                logger.warning("发送每日汇总邮件失败: %s", e)
-
-    logger.info("TJU Daily Bot finished.")
+            with open(summary_path, "r", encoding="utf-8") as f:
+                summary_text = f.read()
+            from src.notifier import send_alert
+            ok = send_alert(
+                f"📰 TJU Daily Bot 每日汇总 · {beijing_now().strftime('%Y-%m-%d')}",
+                summary_text,
+            )
+            logger.info("每日汇总邮件发送: %s", "成功" if ok else "失败(检查SMTP)")
+        return summary_path
+    except Exception as e:
+        logger.warning("每日汇总失败: %s", e)
+        return None
 
 
 def build_daily_summary() -> str | None:
