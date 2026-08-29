@@ -73,16 +73,14 @@ async def main():
             )
             out.append(f"发码到邮箱: {'成功' if sent else '失败(检查SMTP)'}")
 
-            # 3. 等扫码(跳转 cgi-bin/home)
+            # 3. 等扫码(跳转 cgi-bin/home); 只靠 wait_for_url, 避免导航中 query_selector 报错
             logged_in = False
-            for _ in range(120):  # ~120s
+            for _ in range(150):  # ~150s
                 try:
                     await page.wait_for_url(lambda u: "cgi-bin/home" in u, timeout=2000)
                     logged_in = True
                     break
                 except Exception:
-                    pass
-                if await page.query_selector(".login__type__container__scan__qrcode") is None:
                     pass
                 await page.wait_for_timeout(2000)
             if not logged_in:
@@ -91,7 +89,11 @@ async def main():
                 await browser.close()
                 return 3
 
-            # 4. 捕捉会话
+            # 4. 等新页稳定后捕捉会话(避免导航后 Execution context destroyed)
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=15000)
+            except Exception:
+                pass
             await page.wait_for_timeout(3000)
             cookies = await ctx.cookies()
             url = page.url
