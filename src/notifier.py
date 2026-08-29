@@ -15,6 +15,7 @@ import smtplib
 from email.header import Header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
 
 logger = logging.getLogger(__name__)
 
@@ -32,27 +33,34 @@ def email_configured() -> bool:
     )
 
 
-def send_alert(subject: str, body: str) -> bool:
-    """发送告警邮件.
+def _smtp_params():
+    return (
+        os.environ.get("SMTP_HOST", "smtp.qq.com"),
+        int(os.environ.get("SMTP_PORT", "465")),
+        _bool_env("SMTP_TLS", "true"),
+        os.environ.get("SMTP_USER", ""),
+        os.environ.get("SMTP_PASSWORD", ""),
+        os.environ.get("SMTP_FROM") or os.environ.get("SMTP_USER", ""),
+        [r.strip() for r in os.environ.get("NOTIFY_TO", "").split(";") if r.strip()],
+    )
+
+
+def send_alert(subject: str, body: str, image_path: str | None = None) -> bool:
+    """发送告警邮件（可选附二维码图片）.
 
     Args:
         subject: 邮件主题
-        body: 邮件正文（纯文本）
+        body: 正文（纯文本）
+        image_path: 可选，附件图片路径（如扫码二维码 PNG）
 
     Returns:
         True 如果发送成功
     """
     if not email_configured():
-        logger.warning("SMTP 未配置，无法发送邮件告警：%s", subject)
+        logger.warning("SMTP 未配置，无法发送邮件：%s", subject)
         return False
 
-    smtp_host = os.environ.get("SMTP_HOST", "smtp.qq.com")
-    smtp_port = int(os.environ.get("SMTP_PORT", "465"))
-    use_tls = _bool_env("SMTP_TLS", "true")   # 465 默认 SSL/TLS
-    smtp_user = os.environ.get("SMTP_USER", "")
-    smtp_password = os.environ.get("SMTP_PASSWORD", "")
-    from_addr = os.environ.get("SMTP_FROM", smtp_user)
-    recipients = [r.strip() for r in os.environ.get("NOTIFY_TO", "").split(";") if r.strip()]
+    smtp_host, smtp_port, use_tls, smtp_user, smtp_password, from_addr, recipients = _smtp_params()
 
     msg = MIMEMultipart()
     msg["From"] = from_addr
@@ -60,13 +68,21 @@ def send_alert(subject: str, body: str) -> bool:
     msg["Subject"] = Header(subject, "utf-8")
     msg.attach(MIMEText(body, "plain", "utf-8"))
 
+    if image_path:
+        try:
+            with open(image_path, "rb") as f:
+                img = MIMEImage(f.read(), name=os.path.basename(image_path))
+            img.add_header("Content-Disposition",
+                           "attachment", filename=os.path.basename(image_path))
+            msg.attach(img)
+        except Exception as e:
+            logger.warning("附加图片失败（继续发送正文）: %s", e)
+
     try:
         server = None
         if use_tls:
-            # SSL 模式（465）
             server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30)
         else:
-            # STARTTLS 模式（587）
             server = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
             server.ehlo()
             server.starttls()

@@ -20,9 +20,9 @@ jobs:
         env:
           USERNAME: admin
           PASSWORD: admin@123
-          # 微信读书采集模式：用 WEREAD_COOKIE 抓公众号（替代扫码）
-          GATHER.MODEL: weread_mp
-          WEREAD_COOKIE: ${{ secrets.WEREAD_COOKIE }}
+          # 用默认 web（微信公众平台）采集模式 → 能抓每号多篇。
+          # 不要设 weread_mp（那是微信读书单篇模式，每号仅最新 1 篇）。
+          # 微信公众平台会话通过云端扫码登录建立（见 tools/wemp_scan_auth.py）。
         # 注意：不要在该容器上配置 --health-cmd（we-mp-rss 镜像内无 curl，
         # 会导致 healthcheck 一直 unhealthy 而被 GitHub 判定容器启动失败）。
         # 服务就绪等待改由下方 "Wait for we-mp-rss" 宿主 bash get 检测负责。
@@ -69,7 +69,15 @@ jobs:
         env:
           WE_MP_RSS_BASE: http://localhost:8001
 
-      # 诊断 /rss/fresh 返回结构，定位日报标题/链接解析异常（临时，排查后移除）
+      # 微信公众平台扫码认证（建立抓多篇的会话）。首次/过期时会把二维码发到你邮箱，
+      # 你扫码后 we-mp-rss 才能抓每号多篇。|| true 保证未扫码不阻塞本轮。
+      # 会话通过 actions/cache 沿用，后续无需频繁扫。
+      - name: WeChat scan auth (for multi-article)
+        run: python tools/wemp_scan_auth.py --base http://localhost:8001 --wait-seconds 120 || true
+        env:
+          WE_MP_RSS_BASE: http://localhost:8001
+
+      # 诊断 /rss/fresh 返回结构（临时，排查后移除）
       - name: Diagnose we-mp-rss RSS
         run: python tools/diagnose_wemp_rss.py --base http://localhost:8001
         env:
