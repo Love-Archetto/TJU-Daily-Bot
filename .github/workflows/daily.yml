@@ -1,7 +1,8 @@
 name: TJU Daily Bot
 on:
   schedule:
-    - cron: '0 8 * * *'
+    # 每天早上 6:00 北京时间 (UTC 22:00 前一天; GitHub cron 用 UTC，中国无夏令时恒定正确)
+    - cron: '0 22 * * *'
   workflow_dispatch:
 # 允许 GITHUB_TOKEN 写回仓库(output/ 和 state.json push 所需)
 permissions:

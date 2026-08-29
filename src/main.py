@@ -15,10 +15,18 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import yaml
+
+# 北京时区 (UTC+8)；GitHub Actions 运行于 UTC，报告时间戳须用北京时间
+_BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def beijing_now() -> datetime:
+    """返回当前北京时间 (带时区)."""
+    return datetime.now(_BEIJING_TZ)
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -140,7 +148,7 @@ def generate_report(
     checker_result: dict | None = None,
 ) -> str:
     """生成 Markdown 报告."""
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = beijing_now().strftime("%Y-%m-%d %H:%M:%S")
     lines = [
         f"# 天津大学每日智能信息简报",
         f"",
@@ -234,7 +242,7 @@ def main() -> None:
 
     # 1. 加载状态
     state = load_state()
-    now = datetime.now().isoformat()
+    now = beijing_now().isoformat()
     is_ci = os.environ.get("CI", "").lower() == "true"
 
     # 2. 加载信源，抓取网站 + 公众号（公众号经 we-mp-rss 拉 RSS）
@@ -297,7 +305,7 @@ def main() -> None:
     final_report = generate_report(part1, part2, part3, profile, checker_result)
 
     # 8. 写入输出文件
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    timestamp = beijing_now().strftime("%Y-%m-%d_%H-%M-%S")
     output_filename = f"{timestamp}.md"
     output_path = os.path.join(PROJECT_ROOT, "..", "output", output_filename)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -320,7 +328,7 @@ def main() -> None:
 
     # 11. CI 环境自动推送
     if is_ci:
-        result = commit_and_push(f"daily report {datetime.now().strftime('%Y-%m-%d')}")
+        result = commit_and_push(f"daily report {beijing_now().strftime('%Y-%m-%d')}")
         logger.info("CI push: %s", result)
 
     logger.info("TJU Daily Bot finished.")
