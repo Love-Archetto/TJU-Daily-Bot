@@ -60,16 +60,24 @@ def _get_json(url, token, timeout=30):
         return r.status_code, r.text
 
 
-def _download_qr(base: str, token: str, dest: Path) -> bool:
-    """下载扫码二维码图片到 dest."""
-    url = f"{base}{API_PREFIX}/auth/qr/image"
-    r = requests.get(url, headers=_hdr(token), timeout=30)
-    if r.status_code != 200 or len(r.content) < 100:  # 太小的不是有效 png
-        logger.warning("二维码图片获取失败 HTTP=%s len=%s", r.status_code, len(r.content))
-        return False
-    dest.write_bytes(r.content)
-    logger.info("二维码已保存: %s", dest)
-    return True
+def _download_qr(base: str, token: str, dest: Path, max_retries: int = 12, retry_delay: float = 2.0) -> bool:
+    """触发后轮询下载扫码二维码图片. we-mp-rss 异步生成 PNG, 需等待 is_exists 变 true."""
+    for i in range(max_retries):
+        url = f"{base}{API_PREFIX}/auth/qr/image"
+        try:
+            r = requests.get(url, headers=_hdr(token), timeout=30)
+        except requests.RequestException as e:
+            logger.warning("二维码下载异常 (%d/%d): %s", i + 1, max_retries, e)
+            time.sleep(retry_delay)
+            continue
+        if r.status_code == 200 and len(r.content) > 500:  # 有效 PNG 一般 >500 字节
+            dest.write_bytes(r.content)
+            logger.info("二维码已保存: %s (len=%d)", dest, len(r.content))
+            return True
+        logger.info("二维码尚未生成 (HTTP=%s len=%s)，%.1fs 后重试", r.status_code, len(r.content), retry_delay)
+        time.sleep(retry_delay)
+    logger.warning("二维码图片始终未生成，放弃")
+    return False
 
 
 def main() -> None:
@@ -85,9 +93,10 @@ def main() -> None:
     token = _login(base)
     logger.info("登录 we-mp-rss 成功")
 
-    # 1) 触发扫码（生成二维码）
+    # 1) 触发扫码（生成二维码）；we-mp-rss 异步生成 PNG，先等一下再下载
     sc, data = _get_json(f"{base}{API_PREFIX}/auth/qr/code", token)
     logger.info("qr/code 触发 HTTP=%s resp=%s", sc, str(data)[:200])
+    time.sleep(3)
 
     # 2) 下载二维码并发邮箱
     qr_path = PROJECT_ROOT / "tools" / "_wx_qrcode.png"
