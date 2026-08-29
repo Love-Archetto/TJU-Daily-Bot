@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 from src.crawler.web_crawler import fetch_articles_from_list_page
-from src.crawler.wemp_rss_crawler import fetch_all_articles as fetch_wemp_all, healthy as wemp_healthy
+from src.crawler.sogou_wechat_crawler import fetch_wechat_articles
 from src.ai_engine.fault_tolerant_client import FaultTolerantClient
 from src.ai_engine.independent_checker import IndependentChecker
 from tui.local_git import commit_and_push
@@ -257,18 +257,15 @@ def main() -> None:
             fetch_summary[source_name] = len(articles)
             state["source_last_fetch"][source_name] = now
 
-    # 3. 公众号批量抓取（从 we-mp-rss 拉聚合 RSS；服务地址默认 localhost:8001，
-    #    可用环境变量 WE_MP_RSS_BASE 覆盖，Actions 里指向 service 容器）
+    # 3. 公众号批量抓取（搜狗微信搜索——纯云端零人工拿多篇）
     gzh_sources = [x for x in sources if x.get("type") == "wechat_rss"]
     if gzh_sources:
-        if not wemp_healthy():
-            logger.warning("we-mp-rss 服务不可达，跳过公众号抓取")
-        else:
-            wechat_articles = fetch_wemp_all()
-            all_articles.extend(wechat_articles)
-            fetch_summary["wechat_total"] = len(wechat_articles)
-            for name in [x.get("name") for x in gzh_sources]:
-                state["source_last_fetch"][name] = now
+        # 本地/本地仿真可传 account_names；默认从 sources.yaml 读公众号名
+        wechat_articles = fetch_wechat_articles()
+        all_articles.extend(wechat_articles)
+        fetch_summary["wechat_total"] = len(wechat_articles)
+        for name in [x.get("name") for x in gzh_sources]:
+            state["source_last_fetch"][name] = now
 
     # 3. 增量过滤
     new_articles = [a for a in all_articles if is_new_article(a, state)]
