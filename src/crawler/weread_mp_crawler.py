@@ -118,6 +118,7 @@ def fetch_latest_article(cookie: str, book_id: str, timeout: int = 15) -> dict[s
         "link": link,
         "publish_time": "",
         "digest": d.get("digest", ""),
+        "image": d.get("pic", ""),  # 封面图(cover 接口 pic), 供报告展示
     }
 
 

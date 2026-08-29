@@ -71,6 +71,10 @@ def fetch_articles_from_list_page(url: str, selectors: dict[str, str]) -> list[d
     soup = BeautifulSoup(resp.text, "html.parser")
     articles: list[dict[str, Any]] = []
 
+    # 是否进详情页抓正文(sources.yaml 顶层 fetch_detail: true 时开启)
+    fetch_detail = selectors.get("fetch_detail", False)
+    content_sel = selectors.get("article_content", "div.v_news_content")
+
     # 通用 CMS 模式优先
     item_container = selectors.get("item_container")
     if item_container:
@@ -91,11 +95,14 @@ def fetch_articles_from_list_page(url: str, selectors: dict[str, str]) -> list[d
             if link and not link.startswith("http"):
                 link = urljoin(url, link)
             publish_time = _extract_date(it.get_text(" ")) or _extract_date(title)
-            articles.append({
+            article = {
                 "title": title,
                 "link": link,
                 "publish_time": publish_time,
-            })
+            }
+            if fetch_detail and link:
+                article["content"] = fetch_article_detail(link, content_sel)
+            articles.append(article)
         logger.info("Fetched %d articles (CMS-mode) from %s", len(articles), url)
         return articles
 
@@ -142,3 +149,50 @@ def _extract_date(text: str) -> str:
     if m:
         return m.group(1).replace("/", "-").replace(".", "-")
     return ""
+
+
+def fetch_article_detail(link: str, content_selector: str = "div.v_news_content") -> str:
+    """抓取网页文章详情页正文, 转纯文本.
+
+    TRS CMS 标准正文容器为 div.v_news_content(news/cic/cs 通用)。
+    失败/无正文返回 ""(不阻塞)。
+
+    Args:
+        link: 详情页 URL(如 https://news.tju.edu.cn/info/1003/609159.htm)
+        content_selector: 正文容器 CSS 选择器
+
+    Returns:
+        正文纯文本(空白折叠), 或 ""(失败/无正文)
+    """
+    from bs4 import BeautifulSoup
+
+    resp = _make_request(link)
+    if resp is None:
+        logger.warning("详情页请求失败(跳过正文): %s", link)
+        return ""
+    soup = BeautifulSoup(resp.text, "html.parser")
+    # 按容器取正文, 依次回退
+    node = None
+    if content_selector:
+        try:
+            node = soup.select_one(content_selector)
+        except Exception:
+            node = None
+    if node is None:
+        for fallback in (".article-content", "article", "main"):
+            node = soup.select_one(fallback)
+            if node:
+                break
+    if node is None:
+        return ""
+    text = node.get_text("\n", strip=True)
+    # 空白折叠: 多换行/空格压紧
+    import re as _re
+    text = _re.sub(r"[ \t　 ]+", " ", text)
+    text = _re.sub(r"\n{2,}", "\n", text).strip()
+    if not text:
+        return ""
+    # 限制正文长度(供 LLM 摘要用, 足够)
+    if len(text) > 1500:
+        return text[:1500]
+    return text

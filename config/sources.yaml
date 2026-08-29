@@ -5,16 +5,19 @@ sources:
   url: https://news.tju.edu.cn/xw/xsx.htm
   selectors:
     item_container: "li:has(a[href*='/info/'])"
+    fetch_detail: true
 - name: 天大智能与计算学部-通知
   type: web
   url: https://cic.tju.edu.cn/xwzx/tzgg.htm
   selectors:
     item_container: "li:has(a[href*='/info/'])"
+    fetch_detail: true
 - name: 天大计算机学院-通知
   type: web
   url: https://cs.tju.edu.cn/xwgg/notices.htm
   selectors:
     item_container: "li:has(a[href*='/info/'])"
+    fetch_detail: true
 - name: 天大人事处-通知
   type: web
   url: https://hr.tju.edu.cn/tzgg.htm

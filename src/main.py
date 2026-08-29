@@ -36,7 +36,8 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
 
 from src.crawler.web_crawler import fetch_articles_from_list_page
-from src.crawler.weread_mp_crawler import fetch_wechat_articles
+from src.crawler.weread_mp_crawler import fetch_wechat_articles, get_weread_cookie
+from src.crawler.wechat_summary import enhance_wechat_articles
 from src.ai_engine.fault_tolerant_client import FaultTolerantClient
 from src.ai_engine.independent_checker import IndependentChecker
 from tui.local_git import commit_and_push
@@ -108,35 +109,108 @@ def is_new_article(article: dict, state: dict) -> bool:
     return True
 
 
-def classify_articles(
+def _ai_rank_and_summarize(
     articles: list[dict],
     keywords: list[str],
     profile: dict,
 ) -> tuple[list[dict], list[dict], list[dict]]:
-    """将文章分为三部分.
+    """真 AI 推荐 + LLM 精简摘要.
+
+    - Part1 仍由关键词规则命中(确定性)
+    - 其余文章用 LLM 判断"学生需做事项"(报名/申请/公示/通知/竞赛) → part2, 否则 part3
+    - 每条生成精简摘要(≤120字), 写回 article["summary"]
+
+    失败降级: LLM 调用失败 → 回退 classify_articles 规则(part2=前5, 无摘要), 不阻塞。
 
     Returns:
-        (part1_keyword_hits, part2_ai_recommended, part3_rest)
+        (part1, part2, part3)
     """
-    part1 = []
-    part2_rest = []
-
-    for article in articles:
-        title = article.get("title", "")
-        summary = article.get("summary", "")
-        text = f"{title} {summary}".lower()
-
-        # Part1: 关键词命中
+    part1, _rest = [], []
+    for a in articles:
+        text = f"{a.get('title','')} {a.get('summary','')}".lower()
         if any(kw.lower() in text for kw in keywords):
-            part1.append(article)
+            part1.append(a)
         else:
-            part2_rest.append(article)
+            _rest.append(a)
 
-    # Part2/Part3 由 AI 进一步分类（此处简化：前 5 条为 AI 推荐，其余为 Part3）
-    # 完整实现中会调用 AI 模型进行推荐
-    part2 = part2_rest[:5] if len(part2_rest) > 5 else part2_rest
-    part3 = part2_rest[5:] if len(part2_rest) > 5 else []
+    if not articles:
+        return part1, [], []
 
+    # 所有文章(含 part1)都给 LLM 生成摘要; priority 只对 rest 排序用
+    all_articles = articles  # part1 + _rest
+    # 构造 LLM 输入: 每条 index + title + source + content 片段
+    lines = []
+    for i, a in enumerate(all_articles):
+        hint = (a.get("content") or a.get("summary") or "").strip()[:300]
+        lines.append(
+            f"[{i}] 来源:{a.get('source','')} | 标题:{a.get('title','')}"
+            + (f" | 内容:{hint}" if hint else "")
+        )
+    user_prompt = (
+        "以下是若干条校园资讯(索引号标注)。用户画像: "
+        + (profile.get('degree','') + '/' + profile.get('college','') + '/' + profile.get('major','')).strip('/')
+        + "。\n"
+        "任务:\n"
+        "1. 对每条生成一句精简摘要(≤120字, 中文)。\n"
+        "2. 判断每条 priority: 'high' 必须是【需要学生采取行动】的事项(如报名/申请/申报/选课/缴费/竞赛/评奖/公示/通知/截止/会议提醒/招聘); "
+        "'normal' 是纯资讯/新闻/成果报道/科普, 无需学生操作。宁可少标 high, 也不要高估。\n"
+        "只返回严格 JSON: {\"items\":[{\"index\":n,\"summary\":\"...\",\"priority\":\"high|normal\"}]}\n\n"
+        + "\n".join(lines)
+    )
+
+    summaries: dict = {}
+    priorities: dict = {}
+    try:
+        client = FaultTolerantClient()
+        resp = client.call(
+            prompt=user_prompt,
+            system_prompt=(
+                "你是面向天津大学的智能信息简报助手。输出必须为合法 JSON, 不得有多余文字。"
+            ),
+            temperature=0.2,
+            max_tokens=2000,
+        )
+        content = resp.choices[0].message.content or ""
+        import json as _json
+        try:
+            data = _json.loads(content)
+        except Exception:
+            from json_repair import repair_json
+            data = _json.loads(repair_json(content))
+        for it in data.get("items", []):
+            idx = it.get("index")
+            if isinstance(idx, int) and 0 <= idx < len(all_articles):
+                summaries[idx] = it.get("summary", "")
+                priorities[idx] = it.get("priority", "normal")
+        logger.info("AI 摘要/推荐成功: %d 条", len(summaries))
+    except Exception as e:
+        logger.warning("AI 摘要/推荐失败, 回退规则式: %s", e)
+
+    # 写回摘要(所有文章)
+    for i, a in enumerate(all_articles):
+        if i in summaries and summaries[i]:
+            a["summary"] = summaries[i]
+
+    # rest 按 priority 分 part2/part3(part1 不走此排序)
+    # 规则兜底: 标题含明确行动类字眼的强制 high, 保证"学生需做事项"不被漏掉
+    ACTION_KEYWORDS = ("申报", "报名", "申请", "选课", "缴费", "竞", "评选", "公示",
+                       "通知", "提交", "截止", "动员", "启动", "征集", "招聘", "会议通知")
+    rest_start = len(part1)
+    part2, part3 = [], []
+    for i, a in zip(range(rest_start, len(all_articles)), _rest):
+        title = a.get("title", "")
+        rule_high = any(k in title for k in ACTION_KEYWORDS)
+        ai_high = priorities.get(i, "normal") == "high"
+        if rule_high or ai_high:
+            part2.append(a)
+        else:
+            part3.append(a)
+    # AI 失败时降级: 无 priority 信息 → 至少规则保留入 part2
+    if not priorities:
+        part2 = _rest[:5]
+        part3 = _rest[5:]
+    if not part2:
+        part2, part3 = _rest, []
     return part1, part2, part3
 
 
@@ -166,7 +240,10 @@ def generate_report(
             lines.append(f"### {i}. {article.get('title', '无标题')}")
             lines.append(f"- **来源**: {article.get('source', '未知')}")
             lines.append(f"- **链接**: [{article.get('link', '#')}]({article.get('link', '#')})")
-            lines.append(f"- **时间**: {article.get('publish_time', '未知')}")
+            if article.get("image"):
+                lines.append(f"![封面]({article['image']})")
+            if article.get("publish_time"):
+                lines.append(f"- **时间**: {article.get('publish_time')}")
             if article.get("summary"):
                 lines.append(f"- **摘要**: {article['summary']}")
             lines.append("")
@@ -186,7 +263,10 @@ def generate_report(
             lines.append(f"### {i}. {article.get('title', '无标题')}")
             lines.append(f"- **来源**: {article.get('source', '未知')}")
             lines.append(f"- **链接**: [{article.get('link', '#')}]({article.get('link', '#')})")
-            lines.append(f"- **时间**: {article.get('publish_time', '未知')}")
+            if article.get("image"):
+                lines.append(f"![封面]({article['image']})")
+            if article.get("publish_time"):
+                lines.append(f"- **时间**: {article.get('publish_time')}")
             if article.get("summary"):
                 lines.append(f"- **摘要**: {article['summary']}")
             lines.append("")
@@ -291,10 +371,17 @@ def main() -> None:
     keywords = load_keywords()
     profile = load_profile()
 
-    # 5. 分类
-    part1, part2, part3 = classify_articles(new_articles, keywords, profile)
+    # 5. 公众号文章增强: 补发布时间 + 正文(Playwright 渲染), 供 LLM 摘要
+    try:
+        cookie = get_weread_cookie()
+        enhance_wechat_articles(new_articles, cookie)
+    except Exception as e:
+        logger.warning("公众号增强失败(跳过): %s", e)
 
-    # 6. 生成报告
+    # 6. 真 AI 推荐 + LLM 摘要(失败降级为规则式)
+    part1, part2, part3 = _ai_rank_and_summarize(new_articles, keywords, profile)
+
+    # 7. 生成报告
     report = generate_report(part1, part2, part3, profile)
 
     # 7. 独立检查

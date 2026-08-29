@@ -18,6 +18,11 @@ jobs:
           python-version: '3.10'
 
       - run: pip install -r requirements.txt
+      # 公众号正文渲染需要 Playwright(纯 requests 拿不到 mp.weixin 正文, JS 动态渲染)
+      - name: Install Playwright + Chromium
+        run: |
+          pip install playwright
+          python -m playwright install chromium
 
       - name: Run main pipeline
         run: |
