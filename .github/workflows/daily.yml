@@ -17,6 +17,9 @@ jobs:
         env:
           USERNAME: admin
           PASSWORD: admin@123
+          # 微信读书采集模式：用 WEREAD_COOKIE 抓公众号（替代扫码）
+          GATHER.MODEL: weread_mp
+          WEREAD_COOKIE: ${{ secrets.WEREAD_COOKIE }}
         options: >-
           --health-cmd "curl -sf http://localhost:8001/ || exit 1"
           --health-interval 10s
@@ -50,6 +53,13 @@ jobs:
             echo "waiting we-mp-rss... ($i)"
             sleep 5
           done
+
+      # 初始化公众号订阅（幂等：已存在则更新，不会重复）。首次/少量测试用 --limit；
+      # 待验证通过后可去掉 --limit 全量 110 个。
+      - name: Init wechat subscriptions
+        run: python tools/init_wechat_subscriptions.py --base http://localhost:8001 --limit 5
+        env:
+          WE_MP_RSS_BASE: http://localhost:8001
 
       - run: python src/main.py
         env:
