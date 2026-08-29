@@ -188,6 +188,15 @@ def fetch_wechat_articles(account_names: list[str] | None = None) -> list[dict[s
         except Exception:
             account_names = []
 
+    # 测试样本控制: 设 WECHAT_SAMPLE=N 则只抓前 N 个公众号(避免长时间跑)
+    try:
+        sample = int(os.environ.get("WECHAT_SAMPLE", "0") or 0)
+        if sample > 0:
+            account_names = account_names[:sample]
+            logger.info("WECHAT_SAMPLE=%s, 本次仅抓前 %d 个公众号", sample, len(account_names))
+    except ValueError:
+        pass
+
     if not account_names:
         logger.warning("无公众号名可搜索")
         return []

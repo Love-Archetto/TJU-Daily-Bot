@@ -25,6 +25,13 @@ jobs:
           TJU_API_KEY: ${{ secrets.TJU_API_KEY }}
           TJU_API_BASE: https://ai.tju.edu.cn/api/v3
 
+      # 云端 MP API 直连测试(wechat-grab 思路): 验证云端能否直接调 mp.weixin.qq.com 抓公众号
+      - name: Test MP API direct (cloud)
+        run: python tools/test_mp_api_cloud.py --limit 3 || true
+        env:
+          MP_COOKIE: ${{ secrets.MP_COOKIE }}
+          MP_TOKEN: ${{ secrets.MP_TOKEN }}
+
       - name: Run main pipeline
         run: |
           git config user.name "TJU Bot"
@@ -32,6 +39,8 @@ jobs:
           python src/main.py
         env:
           CI: true
+          # 测试样本: 公众号只抓前 5 个(为验证/调试; 全量时删掉或设更大)
+          WECHAT_SAMPLE: 5
           # TJU 开源大模型平台（主模型 + 检查器）
           TJU_API_KEY: ${{ secrets.TJU_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
