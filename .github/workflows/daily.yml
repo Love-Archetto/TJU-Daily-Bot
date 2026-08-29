@@ -18,9 +18,16 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      # 临时验证: 云端能否按 we-mp-rss 方法拿到登录二维码(web 多篇模式云端可复活?)
-      - name: Test we-mp-rss QR (cloud)
-        run: python tools/test_wemp_qr_cloud.py || true
+      # 装 Playwright + chromium(为扫码复刻测试; we-mp-rss 扫码靠真实浏览器)
+      - name: Setup Playwright
+        run: |
+          pip install playwright
+          python -m playwright install chromium
+        shell: bash
+
+      # 复刻 we-mp-rss wxLogin: 云端能否用 Playwright 生成登录二维码(判断 web 多篇是否可复活)
+      - name: Test we-mp-rss wxLogin (cloud)
+        run: python tools/test_wemp_wxlogin_cloud.py || true
 
       - name: Run main pipeline
         run: |
