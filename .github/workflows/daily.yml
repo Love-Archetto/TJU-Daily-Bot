@@ -33,8 +33,7 @@ jobs:
           CI: true
           # 公众号抓取凭据(公开方案): 从 GitHub Secret 读, 用户手动填微信读书 wr_* cookie
           WEREAD_COOKIE: ${{ secrets.WEREAD_COOKIE }}
-          # 测试样本: 公众号只抓前 10 个(为验证/调试; 全量时删掉或设更大)
-          WECHAT_SAMPLE: 10
+          # 全量抓取全部公众号(不设 WECHAT_SAMPLE → fetch_wechat_articles 不截断)
           # TJU 开源大模型平台（主模型 + 检查器）
           TJU_API_KEY: ${{ secrets.TJU_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
