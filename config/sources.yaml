@@ -145,18 +145,12 @@ sources:
 - name: 天津大学期刊中心
   type: wechat_rss
   fakeid: MzkwMzU5NDE2Mg==
-- name: 天津大学科学技术发展研究院
-  type: wechat_rss
-  fakeid: MzIzMjEyMTEyNw==
 - name: 天大科研
   type: wechat_rss
   fakeid: Mzk3NTk4NTQwMQ==
 - name: 天津大学中国绿色发展研究院
   type: wechat_rss
   fakeid: MzI0NTU3MzIyMg==
-- name: 天津大学科学技术与社会研究中心
-  type: wechat_rss
-  fakeid: MzU2MDEwMzQ2MA==
 - name: 天津大学学生科技创新创业协会
   type: wechat_rss
   fakeid: MzU5NDY5MDY0NA==
@@ -220,9 +214,6 @@ sources:
 - name: 天津大学浙江研究院绍兴-培训中心
   type: wechat_rss
   fakeid: Mzk0NjE4MjI2Mw==
-- name: 天津大学综合服务大厅
-  type: wechat_rss
-  fakeid: MzI3MjIwNTMyNA==
 - name: 青春天大
   type: wechat_rss
   fakeid: MzkyMTQwMDMxOQ==
@@ -286,9 +277,6 @@ sources:
 - name: 天大社团团委
   type: wechat_rss
   fakeid: MjM5MDk4MjgzOA==
-- name: 天大历史同好会
-  type: wechat_rss
-  fakeid: MzI3Mjg3NzM0MQ==
 - name: 天大职协
   type: wechat_rss
   fakeid: MzI2MjY0MTkzMw==
@@ -346,9 +334,6 @@ sources:
 - name: 化学工业与工程
   type: wechat_rss
   fakeid: MzU4NjM3MDExMg==
-- name: 国创计划
-  type: wechat_rss
-  fakeid: Mzg5NzQ0MTI5MA==
 - name: 国家大型地震工程模拟研究设施
   type: wechat_rss
   fakeid: Mzg3MjkxMDk5NQ==
@@ -388,9 +373,6 @@ sources:
 - name: 天津大学分子聚集态科学研究院
   type: wechat_rss
   fakeid: MzIwNTgxODQ5NQ==
-- name: 天津大学前沿技术研究院
-  type: wechat_rss
-  fakeid: MzAwODQ4ODgxMQ==
 - name: 天津大学化工学院
   type: wechat_rss
   fakeid: MjM5Nzk5ODEwNA==
@@ -412,9 +394,6 @@ sources:
 - name: 天津大学学报英文版
   type: wechat_rss
   fakeid: MzAxNTY2NzM0Nw==
-- name: 天津大学小幼医工作部
-  type: wechat_rss
-  fakeid: MzIwNDcyMDM0OA==
 - name: 天津大学幼儿园
   type: wechat_rss
   fakeid: MzA3MzEzNzMwMw==
@@ -457,9 +436,6 @@ sources:
 - name: 天津大学青岛海洋工程研究院
   type: wechat_rss
   fakeid: MzIyOTA3MDM1Mg==
-- name: 天津大学高端教育培训
-  type: wechat_rss
-  fakeid: MzA5MjcwNTcwNw==
 - name: 天津心理师成长之路
   type: wechat_rss
   fakeid: MzIxNjg1ODMyMg==
@@ -517,9 +493,6 @@ sources:
 - name: 天大化工书院
   type: wechat_rss
   fakeid: Mzg5NjI1MzQxMQ==
-- name: 天大化工书院管委会
-  type: wechat_rss
-  fakeid: MzA4NTYzMDk0Mw==
 - name: 天津大学学报
   type: wechat_rss
   fakeid: MzI5NDAxNjIyMg==
@@ -547,12 +520,6 @@ sources:
 - name: 海棠花开1895
   type: wechat_rss
   fakeid: Mzg4MTU1NDYwNQ==
-- name: 天大交通
-  type: wechat_rss
-  fakeid: MzU0MzgwMzc1Mg==
-- name: 天大学生会
-  type: wechat_rss
-  fakeid: MjM5NjM3ODMyNA==
 - name: 天大治保会
   type: wechat_rss
   fakeid: MzU1NjcyOTAzMw==
