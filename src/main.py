@@ -325,6 +325,19 @@ def main() -> None:
     now = beijing_now().isoformat()
     is_ci = os.environ.get("CI", "").lower() == "true"
 
+    # 1.5 2h 控闸(自愈调度): cron 每15min触发, 距上次真正执行 <2h 则秒退。
+    #    RUN_FORCE=1(手动发现 workflow_dispatch)或 FORCE=1(本地)时绕过, 便于调试。
+    force = os.environ.get("RUN_FORCE", "") == "true" or os.environ.get("FORCE", "") == "1"
+    last = state.get("last_run")
+    if last and not force:
+        try:
+            last_dt = datetime.fromisoformat(last)
+            if beijing_now() - last_dt < timedelta(hours=2):
+                logger.info("距上次运行 <2h, 跳过本轮(自愈调度, 等待满2h)")
+                return
+        except (ValueError, TypeError):
+            logger.warning("state.last_run 解析失败(%r), 忽略控闸", last)
+
     # 2. 加载信源，抓取网站 + 公众号（公众号经 we-mp-rss 拉 RSS）
     sources = load_sources()
     all_articles = []
@@ -365,8 +378,11 @@ def main() -> None:
 
     if not new_articles:
         logger.info("No new articles, skipping report generation")
-        # 即便本轮无新文章, 北京6点仍要出当日汇总(可能当天已有历史报告)
-        _maybe_daily_summary()
+        # 即便本轮无新文章, 也更新 last_run(作为 2h 控闸基准)
+        state["last_run"] = now
+        # 北京6点后仍未生成当天总结则生成(可能当天已有历史报告)
+        _maybe_daily_summary(state)
+        save_state(state)
         return
 
     # 4. 加载关键词和用户画像
@@ -424,43 +440,54 @@ def main() -> None:
         result = commit_and_push(f"daily report {beijing_now().strftime('%Y-%m-%d')}")
         logger.info("CI push: %s", result)
 
-    # 12. 若本轮是北京6:00窗口, 生成当日汇总并发邮件(独立于本轮有无新文章)
-    _maybe_daily_summary()
+    # 12. 北京6点后仍未生成当天总结则生成并发邮件(独立于本轮有无新文章)
+    _maybe_daily_summary(state)
 
     logger.info("TJU Daily Bot finished.")
 
 
-def _maybe_daily_summary() -> str | None:
-    """若当前为北京 6:00 窗口(6:00-6:59), 生成当日汇总并邮件发送.
+def _maybe_daily_summary(state: dict) -> str | None:
+    """若为北京 6:00 之后、且当天总结尚未生成, 则生成当日汇总并邮件发送.
 
-    独立于"本轮有无新文章": 只要当日 output/ 已有报告(哪怕本轮无新),
-    也在北京6点汇总当日内容。非6点窗口直接返回 None(不做任何事)。
+    幂等: 当天已生成过( state.last_summary_date == today )则不重复。
+    Returns: 汇总文件路径, 或 None(非6点后 / 当天已生成 / 失败)。
     """
-    if beijing_now().hour != 6:
+    if beijing_now().hour < 6:
+        return None
+    today = beijing_now().strftime("%Y-%m-%d")
+    if state.get("last_summary_date") == today:
+        logger.info("当天总结已生成过(%s), 跳过", today)
         return None
     try:
-        summary_path = build_daily_summary()
+        summary_path = build_daily_summary(state)
         logger.info("每日汇总已生成: %s", summary_path)
         if summary_path and os.path.exists(summary_path):
             with open(summary_path, "r", encoding="utf-8") as f:
                 summary_text = f.read()
             from src.notifier import send_alert
             ok = send_alert(
-                f"📰 TJU Daily Bot 每日汇总 · {beijing_now().strftime('%Y-%m-%d')}",
+                f"📰 TJU Daily Bot 每日汇总 · {today}",
                 summary_text,
             )
             logger.info("每日汇总邮件发送: %s", "成功" if ok else "失败(检查SMTP)")
+        # 记录本轮已生成, 防止同一天重复汇总
+        state["last_summary_date"] = today
+        state["last_summary_time"] = beijing_now().isoformat()
         return summary_path
     except Exception as e:
         logger.warning("每日汇总失败: %s", e)
         return None
 
 
-def build_daily_summary() -> str | None:
-    """把 output/ 下今天生成的所有 2h 窗口报告合并成当日汇总(去重).
+def build_daily_summary(state: dict) -> str | None:
+    """把自上次当天总结(若无则全部)以来的所有短时总结, 其 Part1/2/3 完整内容
+    移动聚合为当天总结。各 Part 内部按短时总结时间先后排序。
+
+    Args:
+        state: 含 last_summary_time(上次当天总结的 ISO 时间, 窗口基准)
 
     Returns:
-        汇总文件路径, 或 None
+        当天总结文件路径, 或 None(无可聚合内容)
     """
     import re
     today = beijing_now().strftime("%Y-%m-%d")
@@ -468,51 +495,113 @@ def build_daily_summary() -> str | None:
     summary_dir = os.path.join(output_dir, "summary")
     os.makedirs(summary_dir, exist_ok=True)
 
-    seen_links = set()
-    seen_titles = set()
-    merged: list[dict] = []
-    today_reports = [f for f in os.listdir(output_dir)
-                     if f.startswith(today) and f.endswith(".md")]
-    today_reports.sort()
+    # 窗口基准: 上次当天总结时间; 若无则取最早的短时总结时间(即从全部起算)
+    base_ts = state.get("last_summary_time")
 
-    for fname in today_reports:
-        fpath = os.path.join(output_dir, fname)
+    # 收集 output/ 顶层所有短时总结(排除 summary/ 子目录), 解析文件名时间
+    def _fname_ts(fn: str):
+        # 形如 2026-08-30_01-39-06.md
+        m = re.match(r"(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})\.md$", fn)
+        return m.groups() if m else None
+
+    reports = []
+    for fn in os.listdir(output_dir):
+        ts = _fname_ts(fn)
+        if not ts:
+            continue
+        fpath = os.path.join(output_dir, fn)
         try:
             with open(fpath, "r", encoding="utf-8") as f:
                 content = f.read()
         except Exception:
             continue
-        # 粗糙提取: 匹配 "### N. 标题" 或 "- **链接**: url" 行, 去重
-        for line in content.splitlines():
-            m = re.search(r"\- \*\*链接\*\*: \[.*\]\((https?://[^)]+)\)", line)
-            if m:
-                link = m.group(1)
-                if link not in seen_links:
-                    seen_links.add(link)
-                    merged.append({"link": link})
-            ti = re.search(r"^###\s+\d+\.\s+(.+)$", line)
-            if ti and ti.group(1) not in seen_titles:
-                seen_titles.add(ti.group(1))
+        # 组合成可比较时间字符串 YYYY-MM-DD HH:MM:SS
+        dt = f"{ts[0]} {ts[1]}:{ts[2]}:{ts[3]}"
+        reports.append({"file": fn, "dt": dt, "content": content})
 
-    summary_lines = [
+    # 过滤窗口: dt > 上次当天总结时间
+    if base_ts:
+        try:
+            base_dt = datetime.fromisoformat(base_ts)
+            reports = [r for r in reports if _parse_dt(r["dt"]) > base_dt]
+        except Exception:
+            pass  # 基准解析失败则从全部起算
+    reports.sort(key=lambda r: r["dt"])  # 按时间先后
+
+    if not reports:
+        logger.info("无可聚合的短时总结(窗口内无新增)")
+        return None
+
+    # 聚合三部分: 用正则切出每个 #…总结里 "## Part N" 到下一个标题的段落
+    part_keys = {
+        "1": "Part 1",
+        "2": "Part 2",
+        "3": "Part 3",
+    }
+    # blocks[part] = [(dt, segment), ...] 段含标题(如 "### 1. ...")
+    blocks: dict[str, list] = {"1": [], "2": [], "3": []}
+
+    for r in reports:
+        content = r["content"]
+        # 按 "## Part N:" 或 "## Part N" 切
+        head = None
+        for part, name in part_keys.items():
+            marker = f"## {name}"
+            # 找到所有该 part 标题出现位置的下一个同级标题
+            for m in re.finditer(rf"^##\s+{name}[^\n]*$", content, re.M):
+                # 段内容从 marker 标题行的下一行开始(不含 "## Part N" 标题本身)
+                after_marker = content.find("\n", m.end())
+                start = after_marker + 1 if after_marker != -1 else len(content)
+                # 下一个 "## " 同级标题(注意 "### " 三个#不匹配 "^## ", 安全)
+                nxt = re.search(r"^##\s+", content[start:], re.M)
+                end = start + (nxt.start() if nxt else len(content[start:]))
+                seg = content[start:end].strip()
+                if seg:
+                    blocks[part].append((r["dt"], seg))
+    # 也可用更强健方式: 直接按 Part 数字序号分割全文
+    # (上面已按 "## Part N" 标题精确切段)
+
+    # 组装当天总结: 各 Part 合并, 段内按时间排序
+    header = [
         f"# 天津大学每日信息汇总 · {today}",
         "",
         f"**生成时间(北京)**: {beijing_now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"**覆盖**: 距上次 6:00 以来的 {len(today_reports)} 个窗口更新",
+        f"**覆盖**: {len(reports)} 个短时总结(自上次当天总结), 按时间排序",
         "",
         "---",
+        "",
     ]
-    if merged:
-        summary_lines += ["## 汇总链接"]
-        for i, it in enumerate(merged, 1):
-            summary_lines.append(f"{i}. {it['link']}")
-    else:
-        summary_lines.append("> 今日暂无汇总内容。")
+    out_parts = []
+    titles = {"1": "Part 1: 关键词命中", "2": "Part 2: AI 智能推荐", "3": "Part 3: 其余信息"}
+    any_content = False
+    for part in ["1", "2", "3"]:
+        segs = sorted(blocks[part], key=lambda x: x[0])  # 内部按时间排
+        if not segs:
+            continue
+        any_content = True
+        out_parts.append(f"## {titles[part]} ({len(segs)} 段)")
+        out_parts.append("")
+        for dt, seg in segs:
+            out_parts.append(f"> 来源窗口: {dt}")
+            out_parts.append(seg)
+            out_parts.append("")
 
+    if not any_content:
+        out_parts = ["> 窗口内短时总结均无可聚合的三部分内容。"]
+
+    summary_text = "\n".join(header + out_parts)
     summary_path = os.path.join(summary_dir, f"{today}.md")
     with open(summary_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(summary_lines))
+        f.write(summary_text)
     return summary_path
+
+
+def _parse_dt(s: str):
+    """把 'YYYY-MM-DD HH:MM:SS' 字符串解析成 aware datetime(北京), 用于窗口比较."""
+    try:
+        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=_BEIJING_TZ)
+    except Exception:
+        return None
 
 
 if __name__ == "__main__":

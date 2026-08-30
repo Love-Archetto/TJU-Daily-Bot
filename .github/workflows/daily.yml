@@ -1,10 +1,9 @@
 name: TJU Daily Bot
 on:
   schedule:
-    # 每 2 小时 (UTC) = 北京时间 0/2/4/6/.../22 偶数点。
-    # UTC 偶数点 ±8 仍是偶数点, 故 0 */2 (UTC) 天然对齐北京偶数整点。
-    # 北京 6:00 = UTC 22:00, 已含在此调度内, 由 main.py 检测 bj_hour==6 生成当日汇总。
-    - cron: '0 */2 * * *'
+    # 每 15 分钟触发一次, 由 main.py 依据 state.last_run 做 2h 控闸:
+    # 距上次真正执行 <2h 则跳过, 满 2h 才执行 → 自愈, 解决固定整点 cron 的漏跑/漂移。
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 permissions:
   contents: write
@@ -31,6 +30,8 @@ jobs:
           python src/main.py
         env:
           CI: true
+          # 手动触发(workflow_dispatch)时强制绕过 2h 控闸, 便于手动调试
+          RUN_FORCE: ${{ github.event_name == 'workflow_dispatch' }}
           # 公众号抓取凭据(公开方案): 从 GitHub Secret 读, 用户手动填微信读书 wr_* cookie
           WEREAD_COOKIE: ${{ secrets.WEREAD_COOKIE }}
           # 全量抓取全部公众号(不设 WECHAT_SAMPLE → fetch_wechat_articles 不截断)
