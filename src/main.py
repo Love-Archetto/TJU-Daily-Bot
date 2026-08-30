@@ -473,9 +473,10 @@ def _maybe_daily_summary(state: dict) -> str | None:
                 summary_text,
             )
             logger.info("每日汇总邮件发送: %s", "成功" if ok else "失败(检查SMTP)")
-        # 记录本轮已生成, 防止同一天重复汇总
+        # 记录本轮已生成, 防止同一天重复汇总(此处即持久化, 不依赖调用方)
         state["last_summary_date"] = today
         state["last_summary_time"] = beijing_now().isoformat()
+        save_state(state)
         return summary_path
     except Exception as e:
         logger.warning("每日汇总失败: %s", e)
