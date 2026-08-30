@@ -1,5 +1,0 @@
-尝试打开登录页: https://mp.weixin.qq.com/ (chromium headless, 无额外http头)
-页面URL: https://mp.weixin.qq.com/
-标题: 微信公众平台
-二维码已就绪(可见且可加载): True
-✅ 二维码已截图: /home/runner/work/TJU-Daily-Bot/TJU-Daily-Bot/tools/_wx_login_qr.png (5768 字节) -> 云端可生成, we-mp-rss 思路可行

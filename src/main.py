@@ -362,13 +362,16 @@ def main() -> None:
             fetch_summary[source_name] = len(articles)
             state["source_last_fetch"][source_name] = now
 
-    # 3. 公众号批量抓取（搜狗微信搜索——纯云端零人工拿多篇）
+    # 3. 公众号批量抓取（微信读书 cover, 顺带判定 2 年未更新失效号）
     gzh_sources = [x for x in sources if x.get("type") == "wechat_rss"]
     if gzh_sources:
         # 本地/本地仿真可传 account_names；默认从 sources.yaml 读公众号名
-        wechat_articles = fetch_wechat_articles()
+        wechat_articles, inactive_gzh = fetch_wechat_articles()
         all_articles.extend(wechat_articles)
         fetch_summary["wechat_total"] = len(wechat_articles)
+        # 处理失效公众号: 记录到 deprecated_accounts.yaml + 从 sources.yaml 真删
+        if inactive_gzh:
+            _prune_inactive_gzh(inactive_gzh, sources)
         for name in [x.get("name") for x in gzh_sources]:
             state["source_last_fetch"][name] = now
 
@@ -477,6 +480,53 @@ def _maybe_daily_summary(state: dict) -> str | None:
     except Exception as e:
         logger.warning("每日汇总失败: %s", e)
         return None
+
+
+def _prune_inactive_gzh(inactive: list[dict], sources: list[dict]) -> int:
+    """把失效公众号从 sources.yaml 真删, 并追加记录到 config/deprecated_accounts.yaml.
+
+    Args:
+        inactive: [{"name","fakeid","last_update","removed_date"}, ...]
+        sources: load_sources() 返回的列表(同步内存, 供后续 len 用)
+
+    Returns:
+        实际删除数
+    """
+    import yaml
+    dep_path = os.path.join(PROJECT_ROOT, "..", "config", "deprecated_accounts.yaml")
+    # 读已有记录(去重)
+    dep = []
+    if os.path.exists(dep_path):
+        try:
+            with open(dep_path, "r", encoding="utf-8") as f:
+                dd = yaml.safe_load(f) or {}
+            dep = dd.get("deprecated", [])
+        except Exception:
+            dep = []
+    names = {d.get("name") for d in dep}
+    added = 0
+    for d in inactive:
+        if d["name"] not in names:
+            dep.append(d)
+            names.add(d["name"])
+            added += 1
+    # 写回 deprecated_accounts.yaml
+    with open(dep_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump({"deprecated": dep}, f, allow_unicode=True, sort_keys=False)
+
+    # 从 sources.yaml 真删
+    if added:
+        src_path = os.path.join(PROJECT_ROOT, "..", "config", "sources.yaml")
+        data = yaml.safe_load(open(src_path, encoding="utf-8"))
+        keep = [s for s in data["sources"]
+                if not (s.get("type") == "wechat_rss" and s.get("name") in names)]
+        data["sources"] = keep
+        with open(src_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+        # 同步内存 sources(供 fetch_summary)
+        sources[:] = keep[:]
+        logger.warning("已从 sources.yaml 删除 %d 个失效公众号, 记录于 deprecated_accounts.yaml", added)
+    return added
 
 
 def build_daily_summary(state: dict) -> str | None:

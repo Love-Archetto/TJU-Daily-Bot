@@ -152,14 +152,19 @@ def _maybe_alert_cookie_expired(book_id: str, status: int, detail: str) -> None:
         logger.warning("发送 cookie 失效邮件异常: %s", e)
 
 
-def fetch_wechat_articles(account_names: list[str] | None = None) -> list[dict[str, Any]]:
+def fetch_wechat_articles(account_names: list[str] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """抓取公众号(每号最新1篇) — 微信读书方案.
+
+    顺带判定"2年未更新"的失效公众号(原文页 createTime 距今 > 2 年),
+    失效号不会出现在 articles, 而是放进 inactive 列表由其调用方删除。
 
     Args:
         account_names: 要抓的公众号名列表; None 则全部(type=wechat_rss)
 
     Returns:
-        [{"title","link","publish_time","summary","source"}, ...]
+        (articles, inactive)
+        articles: [{"title","link","publish_time","image","source"}, ...] 活跃号
+        inactive: [{"name","fakeid","last_update","removed_date"}] 失效待删号
     """
     with open(SOURCES_PATH, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
@@ -179,17 +184,62 @@ def fetch_wechat_articles(account_names: list[str] | None = None) -> list[dict[s
     cookie = get_weread_cookie()
     if not cookie:
         logger.warning("无微信读书 cookie(请在 Settings→Secrets 设 WEREAD_COOKIE), 跳过公众号抓取")
-        return []
+        return [], []
 
     articles = []
+    inactive: list[dict[str, Any]] = []
     for i, s in enumerate(gzh):
         book_id = fakeid_to_bookid(s["fakeid"])
         art = fetch_latest_article(cookie, book_id)
         if art:
+            # 顺带判定 2 年未更新: 用原文页 createTime
+            create_time = _fetch_article_create_time(art["link"])
+            if _is_two_years_stale(create_time, s["name"]):
+                inactive.append({
+                    "name": s["name"],
+                    "fakeid": s.get("fakeid", ""),
+                    "last_update": create_time,      # 原文页 createTime
+                    "removed_date": _now_date_str(),  # 判定删除的北京日期
+                })
+                logger.warning("公众号[%s] 2年未更新(最近:%s), 移除", s["name"], create_time)
+                continue  # 失效号不加入 articles
             art["source"] = s["name"]
+            art["publish_time"] = create_time or art.get("publish_time", "")
             articles.append(art)
             logger.info("微信读书[%s] 拿到: %s", s["name"], art["title"][:30])
         if i < len(gzh) - 1:
             time.sleep(PAGE_INTERVAL)
-    logger.info("微信读书抓取共 %d 篇来自 %d 个公众号", len(articles), len(gzh))
-    return articles
+    logger.info("微信读书抓取共 %d 篇来自 %d 个公众号(失效 %d)",
+                len(articles), len(gzh), len(inactive))
+    return articles, inactive
+
+
+def _fetch_article_create_time(link: str) -> str:
+    """从原文页抓公众号最新一篇 createTime(仅为判定活跃度, 失败返回空串)."""
+    try:
+        from .wechat_summary import _fetch_publish_time
+        return _fetch_publish_time(link)
+    except Exception:
+        return ""
+
+
+def _now_date_str() -> str:
+    from datetime import datetime, timedelta, timezone
+    return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+
+
+def _is_two_years_stale(create_time: str, name: str) -> bool:
+    """createTime 距今 > 2 年判定失效. createTime 为空(拿不到)不算失效, 避免误删."""
+    if not create_time:
+        return False
+    try:
+        # createTime 形如 "YYYY-MM-DD HH:MM" 或 "YYYY-MM-DD"
+        import re as _re
+        m = _re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", create_time)
+        if not m:
+            return False
+        dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        from datetime import timedelta
+        return (datetime.now() - dt) > timedelta(days=365 * 2)
+    except Exception:
+        return False
