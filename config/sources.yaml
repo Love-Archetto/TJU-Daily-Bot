@@ -133,9 +133,6 @@ sources:
 - name: 天津大学环境科学与工程学院
   type: wechat_rss
   fakeid: Mzk0NjA5Njc2OA==
-- name: 天津大学发展规划处
-  type: wechat_rss
-  fakeid: MzIwNzEwNzEwMA==
 - name: 天津大学计算机实验教学中心
   type: wechat_rss
   fakeid: MzI4NzY3MDc5Mw==
