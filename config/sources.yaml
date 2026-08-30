@@ -49,9 +49,6 @@ sources:
 - name: 天津大学场馆中心
   type: wechat_rss
   fakeid: MzUzMzcyODY1NA==
-- name: 天津大学场馆服务
-  type: wechat_rss
-  fakeid: MzkwNTE4NzI2MQ==
 - name: 天大心理
   type: wechat_rss
   fakeid: MzUxMjk1NzUyMg==
@@ -289,9 +286,6 @@ sources:
 - name: 天津大学能源学院
   type: wechat_rss
   fakeid: Mzk0NzQyODEzMg==
-- name: 天津大学膳食管理中心
-  type: wechat_rss
-  fakeid: MzI2ODEyMjI4OQ==
 - name: 天津大学未来技术学院
   type: wechat_rss
   fakeid: MzkxNjQ1NTQ5NQ==
@@ -499,9 +493,6 @@ sources:
 - name: 天大研学促
   type: wechat_rss
   fakeid: MjM5ODgwNjcyNQ==
-- name: 天津大学杨柳青年画艺术传承基地
-  type: wechat_rss
-  fakeid: MzI5NTUyMTg1Mw==
 - name: 天津大学校友总会
   type: wechat_rss
   fakeid: MjM5NzU0NzQ3Mw==
