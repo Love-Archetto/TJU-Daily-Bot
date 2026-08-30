@@ -29,7 +29,7 @@ WEREAD_SESSION = os.environ.get("WEREAD_SESSION_PATH", "/tmp/we-mp-rss-data/were
 
 WEREAD_API = "https://weread.qq.com/api/mp/cover"
 # 每个公众号之间间隔(微信读书/page_interval 源码默认 1s)
-PAGE_INTERVAL = 1.0
+PAGE_INTERVAL = 10.0  # 公众号请求间隔(秒), 避免微信读书499限流
 # 一次性告警守卫: 同一轮抓取内 401 只在首次触发邮件, 避免每个号都轰炸
 _ALERTED_LOGIN_FAIL = False
 
@@ -192,7 +192,10 @@ def fetch_wechat_articles(account_names: list[str] | None = None) -> tuple[list[
         book_id = fakeid_to_bookid(s["fakeid"])
         art = fetch_latest_article(cookie, book_id)
         if art:
-            # 顺带判定 2 年未更新: 用原文页 createTime
+            # 顺带判定 1 年未更新: 用原文页 createTime
+            # (createTime 是额外请求, 隔开避免与 cover 连发触发微信读书499限流)
+            if i < len(gzh) - 1:
+                time.sleep(PAGE_INTERVAL * 0.5)
             create_time = _fetch_article_create_time(art["link"])
             if _is_two_years_stale(create_time, s["name"]):
                 inactive.append({
@@ -201,7 +204,7 @@ def fetch_wechat_articles(account_names: list[str] | None = None) -> tuple[list[
                     "last_update": create_time,      # 原文页 createTime
                     "removed_date": _now_date_str(),  # 判定删除的北京日期
                 })
-                logger.warning("公众号[%s] 2年未更新(最近:%s), 移除", s["name"], create_time)
+                logger.warning("公众号[%s] 1年未更新(最近:%s), 移除", s["name"], create_time)
                 continue  # 失效号不加入 articles
             art["source"] = s["name"]
             art["publish_time"] = create_time or art.get("publish_time", "")
@@ -229,7 +232,8 @@ def _now_date_str() -> str:
 
 
 def _is_two_years_stale(create_time: str, name: str) -> bool:
-    """createTime 距今 > 2 年判定失效. createTime 为空(拿不到)不算失效, 避免误删."""
+    """createTime 距今 > 1 年判定失效(用户要求: 一年未更新删除).
+    createTime 为空(拿不到)不算失效, 避免误删."""
     if not create_time:
         return False
     try:
@@ -240,6 +244,6 @@ def _is_two_years_stale(create_time: str, name: str) -> bool:
         if not m:
             return False
         dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-        return (datetime.now() - dt) > timedelta(days=365 * 2)
+        return (datetime.now() - dt) > timedelta(days=365)
     except Exception:
         return False

@@ -140,7 +140,7 @@ def enhance_wechat_articles(articles: list[dict], cookie: str = "") -> list[dict
         a["content"] = _fetch_body_text(a["link"], cookie)
         if not a["content"]:
             logger.info("    未取到公众号正文(%s), 跳过", a["link"])
-        time.sleep(1)  # 间隔, 降限流
+        time.sleep(2)  # 间隔(加倍), 降限流
 
     done = sum(1 for a in todo if a.get("content") or a.get("publish_time"))
     logger.info("公众号增强完成: %d/%d 拿到数据", done, len(todo))
