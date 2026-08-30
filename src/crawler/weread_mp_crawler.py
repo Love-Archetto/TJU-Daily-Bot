@@ -233,13 +233,13 @@ def _is_two_years_stale(create_time: str, name: str) -> bool:
     if not create_time:
         return False
     try:
+        from datetime import datetime, timedelta
         # createTime 形如 "YYYY-MM-DD HH:MM" 或 "YYYY-MM-DD"
         import re as _re
         m = _re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", create_time)
         if not m:
             return False
         dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-        from datetime import timedelta
         return (datetime.now() - dt) > timedelta(days=365 * 2)
     except Exception:
         return False
