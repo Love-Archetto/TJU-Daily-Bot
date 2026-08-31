@@ -1,9 +1,6 @@
 name: TJU Daily Bot
 on:
-  schedule:
-    # 每 15 分钟触发一次, 由 main.py 依据 state.last_run 做 2h 控闸:
-    # 距上次真正执行 <2h 则跳过, 满 2h 才执行 → 自愈, 解决固定整点 cron 的漏跑/漂移。
-    - cron: '*/15 * * * *'
+  # 自动任务已停(移除 schedule cron), 仅保留手动触发(workflow_dispatch)
   workflow_dispatch:
 permissions:
   contents: write
