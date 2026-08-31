@@ -29,7 +29,7 @@ WEREAD_SESSION = os.environ.get("WEREAD_SESSION_PATH", "/tmp/we-mp-rss-data/were
 
 WEREAD_API = "https://weread.qq.com/api/mp/cover"
 # 每个公众号之间间隔(微信读书/page_interval 源码默认 1s)
-PAGE_INTERVAL = 10.0  # 公众号请求间隔(秒), 避免微信读书499限流
+PAGE_INTERVAL = 1.0  # 公众号请求间隔(秒); 遇499限流则退避5min重试(见 fetch_latest_article)
 # 一次性告警守卫: 同一轮抓取内 401 只在首次触发邮件, 避免每个号都轰炸
 _ALERTED_LOGIN_FAIL = False
 
@@ -73,6 +73,8 @@ def fakeid_to_bookid(fakeid: str) -> str:
 def fetch_latest_article(cookie: str, book_id: str, timeout: int = 15) -> dict[str, Any] | None:
     """调 /api/mp/cover 拿某个公众号最新一篇.
 
+    微信读书 499(请求频率过高)时限流退避: 等 5min 重试, 每个最多重试 2 次。
+
     Returns: {"title","link","publish_time","digest"} 或 None(无文章/失败).
     """
     headers = {
@@ -81,31 +83,56 @@ def fetch_latest_article(cookie: str, book_id: str, timeout: int = 15) -> dict[s
         "Referer": "https://weread.qq.com/",
         "Accept": "application/json, text/plain, */*",
     }
-    try:
-        r = requests.get(WEREAD_API, params={"bookId": book_id},
-                         headers=headers, timeout=timeout)
-    except Exception as e:
-        logger.warning("微信读书 cover 请求异常 %s: %s", book_id, e)
+    MAX_499_RETRY = 2
+    RETRY_WAIT = 300  # 秒: 遇499等待5min
+    d: dict[str, Any] | None = None
+    r_status = 0
+    for attempt in range(MAX_499_RETRY + 1):
+        try:
+            r = requests.get(WEREAD_API, params={"bookId": book_id},
+                             headers=headers, timeout=timeout)
+        except Exception as e:
+            logger.warning("微信读书 cover 请求异常 %s: %s", book_id, e)
+            return None
+        r_status = r.status_code
+        logger.info("微信读书 cover %s HTTP=%s 前300: %s",
+                    book_id, r.status_code, r.text[:300].replace("\n", " "))
+        # 499 = 请求频率过高(限流): 等待重试, 最多2次
+        if r.status_code == 499:
+            try:
+                j = r.json()
+                errmsg = (j.get("data") or {}).get("errmsg", "")
+            except Exception:
+                errmsg = ""
+            if "频率" in errmsg or "过高" in errmsg or r.status_code == 499:
+                if attempt < MAX_499_RETRY:
+                    logger.warning("微信读书 %s 请求频率过高(499), 等待 %ds 后重试(%d/%d)",
+                                   book_id, RETRY_WAIT, attempt + 1, MAX_499_RETRY)
+                    time.sleep(RETRY_WAIT)
+                    continue
+                else:
+                    logger.warning("微信读书 %s 连续 %d 次499限流, 放弃", book_id, MAX_499_RETRY)
+                    return None
+        try:
+            d = r.json()
+        except Exception as e:
+            logger.warning("cover 返回非JSON(%s): %s", r.status_code, r.text[:200])
+            return None
+        break  # 非499, 拿到响应
+    if d is None:
         return None
-    # 详细日志: HTTP 状态 + 响应前 300 字符, 便于判断鉴权/风控/空
-    logger.info("微信读书 cover %s HTTP=%s 前300: %s",
-                book_id, r.status_code, r.text[:300].replace("\n", " "))
-    try:
-        d = r.json()
-    except Exception as e:
-        logger.warning("cover 返回非JSON(%s): %s", r.status_code, r.text[:200])
-        return None
+
     if not d or "reviewId" not in d:
         # 详情: 空dict / 缺字段 / 含错误码
         keys = list(d.keys()) if isinstance(d, dict) else type(d).__name__
         err = d.get("errCode") if isinstance(d, dict) else None
         status_msg = d.get("statusMessage", "") if isinstance(d, dict) else ""
-        if r.status_code == 401 or "LOGIN ERR" in str(status_msg) or err == -2010:
+        if r_status == 401 or "LOGIN ERR" in str(status_msg) or err == -2010:
             # 微信读书 cookie 失效 → 明示并提醒用户重扫(一轮只发一封)
             logger.warning("微信读书 %s login 失效(HTTP=%s %s errmsg=%s), 需重扫更新 wr_* cookie",
-                           book_id, r.status_code, status_msg,
+                           book_id, r_status, status_msg,
                            (d.get("data") or {}).get("errmsg", ""))
-            _maybe_alert_cookie_expired(book_id, r.status_code, str(d)[:200])
+            _maybe_alert_cookie_expired(book_id, r_status, str(d)[:200])
         else:
             logger.info("微信读书 %s 无 reviewId(keys=%s) errCode=%s", book_id, keys, err)
         return None
