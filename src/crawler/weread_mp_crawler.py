@@ -180,68 +180,23 @@ def _maybe_alert_cookie_expired(book_id: str, status: int, detail: str) -> None:
 
 
 def fetch_wechat_articles(account_names: list[str] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """抓取公众号(每号最新1篇) — 微信读书方案.
+    """抓取公众号 — 微信读书订阅接口(书架发现 + /web/mp/articles + UA 伪装正文).
 
-    顺带判定"2年未更新"的失效公众号(原文页 createTime 距今 > 2 年),
-    失效号不会出现在 articles, 而是放进 inactive 列表由其调用方删除。
-
-    Args:
-        account_names: 要抓的公众号名列表; None 则全部(type=wechat_rss)
+    取代旧 cover(/api/mp/cover)方案(被测 499 限流 + 仅 1 篇)。仅追踪
+    微信读书里"已订阅"的公众号。保持返回 (articles, inactive) 契约,
+    使 main.py 调用点(含 _prune_inactive_gzh)不变。
 
     Returns:
         (articles, inactive)
-        articles: [{"title","link","publish_time","image","source"}, ...] 活跃号
-        inactive: [{"name","fakeid","last_update","removed_date"}] 失效待删号
+        articles: [{"title","link","publish_time","source","content","summary"}...]
+        inactive: [{"name","bookId","last_update"}] 1年未更新订阅号(仅记录)
     """
-    with open(SOURCES_PATH, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
-    gzh = [s for s in data.get("sources", []) if s.get("type") == "wechat_rss" and s.get("fakeid")]
-    if account_names:
-        nameset = set(account_names)
-        gzh = [s for s in gzh if s["name"] in nameset]
-    # 测试样本: WECHAT_SAMPLE=N 只抓前 N 个
-    try:
-        sample = int(os.environ.get("WECHAT_SAMPLE", "0") or 0)
-        if sample > 0:
-            gzh = gzh[:sample]
-            logger.info("WECHAT_SAMPLE=%s, 本次仅抓前 %d 个公众号", sample, len(gzh))
-    except ValueError:
-        pass
-
+    from .weread_subscribe import fetch_subscribed_articles
     cookie = get_weread_cookie()
     if not cookie:
         logger.warning("无微信读书 cookie(请在 Settings→Secrets 设 WEREAD_COOKIE), 跳过公众号抓取")
         return [], []
-
-    articles = []
-    inactive: list[dict[str, Any]] = []
-    for i, s in enumerate(gzh):
-        book_id = fakeid_to_bookid(s["fakeid"])
-        art = fetch_latest_article(cookie, book_id)
-        if art:
-            # 顺带判定 1 年未更新: 用原文页 createTime
-            # (createTime 是额外请求, 隔开避免与 cover 连发触发微信读书499限流)
-            if i < len(gzh) - 1:
-                time.sleep(PAGE_INTERVAL * 0.5)
-            create_time = _fetch_article_create_time(art["link"])
-            if _is_two_years_stale(create_time, s["name"]):
-                inactive.append({
-                    "name": s["name"],
-                    "fakeid": s.get("fakeid", ""),
-                    "last_update": create_time,      # 原文页 createTime
-                    "removed_date": _now_date_str(),  # 判定删除的北京日期
-                })
-                logger.warning("公众号[%s] 1年未更新(最近:%s), 移除", s["name"], create_time)
-                continue  # 失效号不加入 articles
-            art["source"] = s["name"]
-            art["publish_time"] = create_time or art.get("publish_time", "")
-            articles.append(art)
-            logger.info("微信读书[%s] 拿到: %s", s["name"], art["title"][:30])
-        if i < len(gzh) - 1:
-            time.sleep(PAGE_INTERVAL)
-    logger.info("微信读书抓取共 %d 篇来自 %d 个公众号(失效 %d)",
-                len(articles), len(gzh), len(inactive))
-    return articles, inactive
+    return fetch_subscribed_articles(cookie)
 
 
 def _fetch_article_create_time(link: str) -> str:

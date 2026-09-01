@@ -28,6 +28,17 @@ def beijing_now() -> datetime:
     """返回当前北京时间 (带时区)."""
     return datetime.now(_BEIJING_TZ)
 
+
+def _daily_window_date() -> str:
+    """当天调度窗口日期: 北京 hour>=4 用当天日期, hour<4 用前一天.
+
+    窗口 = 北京时间 4:00 ~ 次日 4:00 归一个"天"。
+    """
+    now = beijing_now()
+    if now.hour < 4:
+        now = now - timedelta(days=1)
+    return now.strftime("%Y-%m-%d")
+
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -325,18 +336,17 @@ def main() -> None:
     now = beijing_now().isoformat()
     is_ci = os.environ.get("CI", "").lower() == "true"
 
-    # 1.5 2h 控闸(自愈调度): cron 每15min触发, 距上次真正执行 <2h 则秒退。
-    #    RUN_FORCE=1(手动发现 workflow_dispatch)或 FORCE=1(本地)时绕过, 便于调试。
+    # 1.5 一天一次闸门(替代旧的2h控闸): cron 每30min触发, 但当天(北京4:00~次日4:00)
+    #    已运行则跳过。触发时进入执行前立即写 last_daily_date(中途失败下次也跳过)。
+    #    RUN_FORCE(手动 workflow_dispatch) 或 FORCE(本地) 可强制绕过, 便于调试。
     force = os.environ.get("RUN_FORCE", "") == "true" or os.environ.get("FORCE", "") == "1"
-    last = state.get("last_run")
-    if last and not force:
-        try:
-            last_dt = datetime.fromisoformat(last)
-            if beijing_now() - last_dt < timedelta(hours=2):
-                logger.info("距上次运行 <2h, 跳过本轮(自愈调度, 等待满2h)")
-                return
-        except (ValueError, TypeError):
-            logger.warning("state.last_run 解析失败(%r), 忽略控闸", last)
+    today_window = _daily_window_date()
+    if state.get("last_daily_date") == today_window and not force:
+        logger.info("当天(%s)已运行过, 跳过", today_window)
+        return
+    # 触发即写: 进入执行前立即标记"当天已运行"(即使中途失败, 后续30min触发也跳过)
+    state["last_daily_date"] = today_window
+    save_state(state)
 
     # 2. 加载信源，抓取网站 + 公众号（公众号经 we-mp-rss 拉 RSS）
     sources = load_sources()
@@ -450,14 +460,12 @@ def main() -> None:
 
 
 def _maybe_daily_summary(state: dict) -> str | None:
-    """若为北京 6:00 之后、且当天总结尚未生成, 则生成当日汇总并邮件发送.
+    """若当天(北京 4:00~次日4:00 窗口)总结尚未生成, 则生成当日汇总并邮件发送.
 
-    幂等: 当天已生成过( state.last_summary_date == today )则不重复。
-    Returns: 汇总文件路径, 或 None(非6点后 / 当天已生成 / 失败)。
+    一天一次调度下, 当天首次跑即生成总结。幂等: 当天已生成过则跳过。
+    Returns: 汇总文件路径, 或 None(当天已生成 / 失败)。
     """
-    if beijing_now().hour < 6:
-        return None
-    today = beijing_now().strftime("%Y-%m-%d")
+    today = _daily_window_date()
     if state.get("last_summary_date") == today:
         logger.info("当天总结已生成过(%s), 跳过", today)
         return None
