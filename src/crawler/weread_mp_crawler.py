@@ -153,8 +153,9 @@ def fetch_latest_article(cookie: str, book_id: str, timeout: int = 15) -> dict[s
 
 
 def _maybe_alert_cookie_expired(book_id: str, status: int, detail: str) -> None:
-    """微信读书 cookie 失效时发一封提醒邮件(每轮仅一次).
+    """微信读书登录失效时发一封提醒邮件(每轮仅一次).
 
+    本地 CDP 模式(复用真实 Edge): 失效= Edge 里微信读书会话过期, 需在 Edge 窗口重扫登录。
     本地无 SMTP 配置则静默(日志提示), 云端有则发到 NOTIFY_TO。
     """
     global _ALERTED_LOGIN_FAIL
@@ -164,27 +165,25 @@ def _maybe_alert_cookie_expired(book_id: str, status: int, detail: str) -> None:
     try:
         from src.notifier import send_cookie_expired_alert
         guide = (
-            "【微信读书】cookie 已失效(401 LOGIN ERR / 用户不存在)。公众号抓取中断。\n\n"
+            "【微信读书】登录会话失效, 公众号抓取中断。\n\n"
             f"首个失败: {book_id} (HTTP {status})\n"
             f"详情: {detail}\n\n"
-            "解决办法(更新 WEREAD_COOKIE 为新的微信读书 cookie):\n"
-            "1. 用手机微信打开 weread.qq.com → 登录\n"
-            "2. F12 → Network → 任选请求, 复制 wr_vid/wr_skey 等 wr_* 的名字=值拼成 cookie\n"
-            "3. GitHub → Settings → Secrets and variables → Actions → 更新 WEREAD_COOKIE\n"
-            "4. 触发一次 \"TJU Daily Bot\" 主任务即可恢复\n"
+            "解决办法(本地复用 Edge 模式):\n"
+            "1. 找到跑着调试端口的 Edge 窗口(或运行 tools/start_weread_edge.py)\n"
+            "2. 在那个 Edge 里退出登录 → 用手机微信重新扫码登录微信读书\n"
+            "3. 点进任意一个订阅的公众号, 等阅读器页标题出现「公众号」后重试\n"
         )
         if not send_cookie_expired_alert(1, "微信读书 " + guide):
-            logger.warning("cookie 失效邮件发送失败(检查 SMTP secret)")
+            logger.warning("登录失效邮件发送失败(检查 SMTP secret)")
     except Exception as e:
-        logger.warning("发送 cookie 失效邮件异常: %s", e)
+        logger.warning("发送登录失效邮件异常: %s", e)
 
 
 def fetch_wechat_articles(account_names: list[str] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """抓取公众号 — 微信读书订阅接口(书架发现 + /web/mp/articles + UA 伪装正文).
+    """抓取公众号 — 复用真实 Edge(CDP) + /web/mp/articles + UA 伪装正文.
 
-    取代旧 cover(/api/mp/cover)方案(被测 499 限流 + 仅 1 篇)。仅追踪
-    微信读书里"已订阅"的公众号。保持返回 (articles, inactive) 契约,
-    使 main.py 调用点(含 _prune_inactive_gzh)不变。
+    取代旧 cover(/api/mp/cover)方案与 headless+cookie 方案。仅追踪微信读书里"已订阅"的公众号。
+    保持返回 (articles, inactive) 契约, 使 main.py 调用点(含 _prune_inactive_gzh)不变。
 
     Returns:
         (articles, inactive)
@@ -192,11 +191,8 @@ def fetch_wechat_articles(account_names: list[str] | None = None) -> tuple[list[
         inactive: [{"name","bookId","last_update"}] 1年未更新订阅号(仅记录)
     """
     from .weread_subscribe import fetch_subscribed_articles
-    cookie = get_weread_cookie()
-    if not cookie:
-        logger.warning("无微信读书 cookie(请在 Settings→Secrets 设 WEREAD_COOKIE), 跳过公众号抓取")
-        return [], []
-    return fetch_subscribed_articles(cookie)
+    # CDP 复用真实 Edge 会话; Edge 未起/未登录时 fetch_subscribed_articles 内部会友好提示并返回空。
+    return fetch_subscribed_articles()
 
 
 def _fetch_article_create_time(link: str) -> str:

@@ -1,12 +1,16 @@
-"""微信读书新接口公众号抓取 — 书架订阅 + /web/mp/articles + UA 伪装正文.
+"""微信读书新接口公众号抓取 — 复用真实 Edge(CDP) + /web/mp/articles + UA 伪装正文.
 
-取代被限流的 cover(/api/mp/cover) 方案。三条已验证的能力:
-  1. /web/shelf/sync 书架接口 → 动态发现"已订阅"的公众号(MP_WXS_开头)
+取代"自开 headless + 注入 cookie"(那会触发腾讯防水墙验证码, articles 返回 -2041)。
+三条能力:
+  1. /web/shelf/sync 书架接口 → 动态发现"已订阅"的公众号(MP_WXS_开头), 每个号带 readerUrl
   2. /web/mp/articles?bookId=&offset= → 拿该号文章列表(多篇), 含 mp.weixin 原文直链
   3. UA 伪装(MicroMessenger UA + requests) → 抓 mp.weixin 正文(绕滑块, 替代 Playwright 渲染)
-实测: articles/articles 需在 Playwright 页面上下文 fetch(纯 requests 返回 -2041)。
+关键上下文(对齐 Pengyf04/weread-mp-fetcher): /web/mp/articles 必须在**阅读器页**
+  /web/mp/reader/<hash> 的页面上下文里 fetch(首页发返回 -2041; 无头自开会弹验证码)。
+  readerUrl 由书架 deepLink 的校验 hash `v` 拼出(不可自拼)。执行上下文来自登录过的真实 Edge
+  (见 weread_cdp), 不新开浏览器。
 
-依赖: playwright(项目已装)。cookie 从 env/.env 的 WEREAD_COOKIE 读。
+依赖: playwright(项目已装) / MS Edge。不再需要 WEREAD_COOKIE(登录态在 Edge 会话里)。
 默认间隔: 所有请求(书架/articles/UA正文)之间 3min±60s(180±60s), 防微信读书限流。
 """
 
@@ -55,49 +59,36 @@ def _get_cookie() -> str:
     return c
 
 
-def _run_page_js(cookie: str, js: str, tag: str) -> dict:
-    """在 weread 页面上下文执行 JS(书架/articles). 用 sync_playwright(Windows 稳定).
+def _run_page_js(cookie: str, js: str, tag: str, page_url: str = "https://weread.qq.com/") -> dict:
+    """在 weread 页面上下文执行 JS(书架/articles).
 
-    Playwright async 在 Windows 上会因 proactor 事件循环 + 浏览器子进程崩(I/O closed pipe),
-    故用 sync_api。
+    复用已登录、已过验证码的真实 Edge(见 weread_cdp): 不新开浏览器, connect_over_cdp 到
+    调试端口上的 Edge。阅读器页 URL 走 `/web/mp/reader/<hash>` 上下文(否则 articles 返回 -2041),
+    其余(书架)用 edge 里任一 weread 页上下文。cookie 参数在 CDP 模式下不再需要(登录态在 Edge 会话里)。
     """
     import json
-    from playwright.sync_api import sync_playwright
+    from . import weread_cdp
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True,
-                                    args=["--no-sandbox", "--disable-dev-shm-usage"])
-        try:
-            ctx = browser.new_context(
-                user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                            "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"),
-                locale="zh-CN",
-            )
-            for pair in cookie.split(";"):
-                if "=" in pair:
-                    k, v = pair.strip().split("=", 1)
-                    try:
-                        ctx.add_cookies([{"name": k, "value": v, "domain": ".qq.com", "path": "/"}])
-                    except Exception:
-                        pass
-            page = ctx.new_page()
-            page.goto("https://weread.qq.com/", wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(2500)
-            raw = page.evaluate(js)
-            return json.loads(raw) if isinstance(raw, str) else raw
-        finally:
-            browser.close()
+    try:
+        raw = weread_cdp.evaluate_on_reader_tab(js, page_url)
+    except Exception as e:
+        logger.warning("CDP 执行 %s 失败: %s", tag, str(e)[:160])
+        return {}
+    return json.loads(raw) if isinstance(raw, str) else raw
 
 
 def list_subscribed(cookie: str) -> list[dict]:
-    """书架接口发现已订阅的公众号. 返回 [{"name","bookId","v"}...]."""
-    # 与 tools/test_weread_reader.py 验证过的 SHELF 脚本一致(逐字符)
-    js = ("(()=>fetch('/web/shelf/sync?synckey=0&teenmode=0&album=1',{credentials:'include'})"
-          ".then(r=>r.json()).then(o=>JSON.stringify({errCode:o.errCode,books:(o.books||[])"
-          ".filter(b=>String(b.bookId||'').indexOf('MP_WXS_')===0)"
-          ".map(b=>({name:b.title,bookId:b.bookId,"
-          "v:(b.deepLink||'').match(/[?&]v=([^&]+)/)?.[1]||null}))}))"
-          ".catch(e=>JSON.stringify({err:String(e)})))()")
+    """书架接口发现已订阅的公众号. 返回 [{"name","bookId","readerUrl"}...].
+
+    readerUrl 由每条 deepLink 的 `v`(微信读书校验 hash, 每号各不相同, 不可自拼)
+    拼出: it 是 /web/mp/articles 唯一能用(非 -2041)的发起页上下文, 对齐
+    Pengyf04/weread-mp-fetcher 的核心约束。
+    """
+    # 与 tools/test_weread_reader.py 验证过的 SHELF 脚本一致(逐字符), 仅把 v 换成 readerUrl
+    # (块箭头 map + return: 整串经 node --check 验证括号平衡)
+    js = (
+          "(()=>fetch('/web/shelf/sync?synckey=0&teenmode=0&album=1',{credentials:'include'}).then(r=>r.json()).then(o=>JSON.stringify({errCode:o.errCode,books:(o.books||[]).filter(b=>String(b.bookId||'').indexOf('MP_WXS_')===0).map(b=>{var v=(b.deepLink||'').match(/[?&]v=([^&]+)/)?.[1]||null;return {name:b.title,bookId:b.bookId,readerUrl:v?('https://weread.qq.com/web/mp/reader/'+v):null};})})).catch(e=>JSON.stringify({err:String(e)})))()"
+    )
     d = _run_page_js(cookie, js, "shelf")
     if d.get("errCode"):
         logger.warning("书架接口 errCode=%s", d.get("errCode"))
@@ -108,9 +99,12 @@ def list_subscribed(cookie: str) -> list[dict]:
     return subs
 
 
-def fetch_articles(cookie: str, book_id: str, offset: int = 0) -> list[dict]:
+def fetch_articles(cookie: str, book_id: str, reader_url: str = "",
+                   offset: int = 0) -> list[dict]:
     """/web/mp/articles 拿某订阅号文章列表.
 
+    reader_url: 阅读器页 (https://weread.qq.com/web/mp/reader/<hash>)。**必须**在该页
+    上下文里发 articles 请求, 首页发返回 -2041。缺省退回首字母书页(=原首页路径)。
     offset 是"已跳过的群发条数"(非文章篇数)。返回 [{"title","url","createTime"}...]。
     """
     url = f"/web/mp/articles?bookId={book_id}&offset={offset}"
@@ -122,7 +116,8 @@ def fetch_articles(cookie: str, book_id: str, offset: int = 0) -> list[dict]:
           "ct:s.review?Number(s.review.createTime||0):0,rid:(s.review&&s.review.reviewId)||''}})).flat(),"
           "n:(o.reviews||[]).length}))"
           ".catch(e=>JSON.stringify({err:String(e)})))()")
-    d = _run_page_js(cookie, js, "articles")
+    page_url = reader_url or "https://weread.qq.com/"
+    d = _run_page_js(cookie, js, "articles", page_url)
     if d.get("errCode"):
         logger.warning("articles errCode=%s bookId=%s", d.get("errCode"), book_id)
         return []
@@ -181,19 +176,30 @@ def fetch_body_ua(url: str) -> dict:
 def fetch_subscribed_articles(cookie: str = "") -> tuple[list[dict], list[dict]]:
     """主入口: 书架订阅号 → articles列表 → UA正文. 返回 (articles, inactive).
 
+    复用真实 Edge(CDP)拿公众号列表; 正文用 UA 伪装(fetch_body_ua)。cookie 参数已不再需要
+    (登录态在 Edge 会话里), 保留仅为兼容旧签名。
     articles: [{"title","url","publish_time","summary","source","createTime"}...]
     inactive: 1年未更新订阅号记录(仅用于日志, 无 fakeid 概念)
     """
-    cookie = cookie or _get_cookie()
-    if not cookie:
-        logger.warning("无微信读书 cookie(设置 WEREAD_COOKIE), 跳过公众号")
-        return [], []
+    from . import weread_cdp as cdp
 
-    subs = list_subscribed(cookie)
+    # 没有可复用的调试 Edge 时, 友好提示而不是静默空抓
+    try:
+        cdp.find_or_launch_edge()
+    except Exception as e:
+        logger.warning("公众号抓取跳过: %s", e)
+
+    subs = list_subscribed("")
     if not subs:
         logger.info("书架无订阅公众号, 跳过")
         return [], []
     _sleep_interval()
+
+    # 阅读器页上下文: 取任一所订阅号的 readerUrl 作为统一抓取页(参考: 进任意一个阅读器页)。
+    # /web/mp/articles 必须在此上下文发, 否则 -2041。
+    reader_url = next((s.get("readerUrl") for s in subs if s.get("readerUrl")), "")
+    if not reader_url:
+        logger.warning("书架条目均无 readerUrl(deepLink 缺 v), articles 会回退首页上下文(可能 -2041)")
 
     articles = []
     inactive = []
@@ -202,7 +208,7 @@ def fetch_subscribed_articles(cookie: str = "") -> tuple[list[dict], list[dict]]
         if not book_id:
             continue
         logger.info("== 抓取订阅号[%s] %s ==", sub.get("name"), book_id)
-        item_list = fetch_articles(cookie, book_id)
+        item_list = fetch_articles("", book_id, reader_url)
         _sleep_interval()
         if not item_list:
             continue

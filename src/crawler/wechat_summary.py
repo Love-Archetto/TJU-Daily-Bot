@@ -1,19 +1,14 @@
 """公众号文章增强 — 补发布时间 + 正文(供 LLM 生成摘要).
 
-背景:
-  weread cover 接口只返回标题/封面/链接, 无摘要无时间。
-  公众号原文页 (mp.weixin.qq.com/s/xxx) 里:
-    - 时间: JS 变量 createTime(纯 requests 可拿)
-    - 正文: Playwright 渲染 #js_content 拿纯文本(纯 requests 拿不到, JS 动态渲染)
-  原理已验证(本地 probe 通过)。
+正文获取改用 UA 伪装法(fetch_body_ua, MicroMessenger UA + requests), 不再用 Playwright 渲染:
+实测 mp.weixin 文章只认 UA 里的 MicroMessenger, 伪装后纯 requests 直接拿完整 HTML, 稳且无需浏览器。
+时间: JS 变量 createTime(纯 requests 可拿)。
 
 策略:
   只对增量过滤后的"公众号新文章"处理(数量通常很少)。
   每篇独立 try/except, 失败跳过不阻塞; 设数量上限防整轮拖垮。
-  复用同一 Playwright browser 循环处理, 省时间省连接。
 
-依赖:
-  playwright(云端 daily 需 pip install + playwright install chromium)
+无浏览器依赖(正文/时间均 requests)。
 """
 
 import logging
@@ -60,47 +55,14 @@ def _fetch_publish_time(link: str, timeout: int = 12) -> str:
     return ""
 
 
-def _fetch_body_text(link: str, cookie: str) -> str:
-    """Playwright 渲染 #js_content 拿正文纯文本. 失败返回 ""."""
+def _fetch_body_text(link: str, cookie: str = "") -> str:
+    """拿公众号正文纯文本. 用 UA 伪装法(fetch_body_ua), 无浏览器依赖. 失败返回 ""."""
     try:
-        from playwright.sync_api import sync_playwright
-    except Exception:
-        logger.warning("playwright 未安装, 跳过公众号正文渲染: %s", link)
-        return ""
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True,
-                                        args=["--no-sandbox", "--disable-dev-shm-usage"])
-            ctx = browser.new_context(user_agent=UA, locale="zh-CN")
-            # 注入 wr_* cookie(有则带, 提升可用性)
-            for pair in (cookie or "").split(";"):
-                if "=" in pair:
-                    k, v = pair.strip().split("=", 1)
-                    try:
-                        ctx.add_cookies([{"name": k, "value": v,
-                                          "domain": ".weixin.qq.com", "path": "/"}])
-                    except Exception:
-                        pass
-            page = ctx.new_page()
-            page.goto(link, wait_until="domcontentloaded", timeout=25000)
-            page.wait_for_timeout(4000)  # 等 JS 渲染正文
-            try:
-                txt = page.eval_on_selector("#js_content", "el => el.innerText")
-            except Exception:
-                txt = ""
-            if not txt or not txt.strip():
-                try:
-                    txt = page.locator("body").inner_text()
-                except Exception:
-                    txt = ""
-            browser.close()
-        text = re.sub(r"[ \t　]+", " ", (txt or "").strip())
-        text = re.sub(r"\n{2,}", "\n", text).strip()
-        if not text:
-            return ""
-        return text[:CONTENT_CAP]
+        from .weread_subscribe import fetch_body_ua
+        bi = fetch_body_ua(link)
+        return bi.get("content", "") or ""
     except Exception as e:
-        logger.warning("渲染公众号正文失败 %s: %s", link, str(e)[:150])
+        logger.warning("UA 抓公众号正文失败 %s: %s", link, str(e)[:150])
         return ""
 
 
