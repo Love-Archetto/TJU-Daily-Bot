@@ -1,9 +1,7 @@
 name: TJU Daily Bot
 on:
-  schedule:
-    # 每 30 分钟触发一次(全天), 由 main.py 按"一天一次"闸门控制:
-    # 当天(北京4:00~次日4:00)已运行则跳过; 北京4点前的触发也因窗口未到跳过。
-    - cron: '*/30 * * * *'
+  # 已停自动任务：日报改为只在本地跑(Run-Daily.bat / main.py)。
+  # 保留手动触发(workflow_dispatch)，需要时可在 GitHub → Actions → Run workflow 手动跑。
   workflow_dispatch:
 permissions:
   contents: write
