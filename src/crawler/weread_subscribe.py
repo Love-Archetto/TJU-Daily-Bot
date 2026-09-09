@@ -11,21 +11,30 @@
   (见 weread_cdp), 不新开浏览器。
 
 依赖: playwright(项目已装) / MS Edge。不再需要 WEREAD_COOKIE(登录态在 Edge 会话里)。
-默认间隔: 所有请求(书架/articles/UA正文)之间 3min±60s(180±60s), 防微信读书限流。
+默认间隔: 所有请求(书架/articles/UA正文)之间 3s±1s(原 180±60s 过慢; 本地人工运行靠
+  下方反爬闸门兜底)。触发反爬(articles -2041 防水墙 / mp.weixin UA 正文风控)时打印提示,
+  等待用户在 Edge/网页里刷新并完成验证后回终端按回车继续; 非交互环境(CI/管道)退避 180s。
 """
 
 import logging
 import os
 import random
 import re
+import sys
 import time
 from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 
-# 请求间隔(秒): 3min ± 60s
-REQUEST_INTERVAL_MEAN = 180.0
-REQUEST_INTERVAL_SPREAD = 60.0
+# 请求间隔(秒): 3s ± 1s(原 180±60s 过慢; 间隔短时靠下方反爬闸门人工兜底)
+REQUEST_INTERVAL_MEAN = 3.0
+REQUEST_INTERVAL_SPREAD = 1.0
+
+# 非交互环境(CI/管道, stdin 非终端)触发反爬后的退避秒数(无真人可刷新, 慢速重试更安全)
+NON_INTERACTIVE_BACKOFF = 180.0
+
+# mp.weixin UA 正文响应的风控/验证页特征(命中视为反爬, 需在真实 Edge 里打开该链接过验证)
+ANTIBOT_MARKERS = ("环境异常", "访问过于频繁", "请完成验证", "完成验证", "去验证", "请输入验证码")
 
 # UA 伪装(weflow-cli 实测有效): 微信内置浏览器
 WECHAT_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
@@ -37,13 +46,48 @@ EOM = "\033[0m"
 
 
 def _sleep_interval():
-    """请求间隔 3min±60s. FAST_TEST=1 时跳过(仅用于调试)."""
+    """请求间隔 3s±1s. FAST_TEST=1 时跳过(仅用于调试)."""
     if os.environ.get("FAST_TEST", "") in ("1", "true"):
         return
     wait = random.uniform(REQUEST_INTERVAL_MEAN - REQUEST_INTERVAL_SPREAD,
                           REQUEST_INTERVAL_MEAN + REQUEST_INTERVAL_SPREAD)
-    logger.info("请求间隔 %.0fs", wait)
+    logger.info("请求间隔 %.1fs", wait)
     time.sleep(wait)
+
+
+def _antibot_wait(tag: str, hint: str) -> None:
+    """反爬闸门: 提示用户在真实 Edge/网页里刷新并完成验证, 回终端按回车后继续.
+
+    交互终端(stdin 是 tty)用 input() 阻塞等按键; 非交互(CI/管道)没有真人可刷新, 改退避
+    NON_INTERACTIVE_BACKOFF 后继续, 避免云端任务无限阻塞。Ctrl+C 可中断本轮。
+    """
+    print(f"\n{CYAN}[反爬/风控] {tag}{EOM}", flush=True)
+    print(f"  {hint}", flush=True)
+    print(f"{CYAN}  请刷新页面并完成验证后, 回终端按 回车 继续(Ctrl+C 终止本轮){EOM}", flush=True)
+    logger.warning("反爬触发, 等待人工处理: %s", tag)
+    try:
+        if sys.stdin.isatty():
+            input()
+            return
+    except (EOFError, KeyboardInterrupt):
+        raise
+    except Exception:
+        pass
+    logger.info("非交互环境(stdin 非终端), 退避 %.0fs 后继续", NON_INTERACTIVE_BACKOFF)
+    time.sleep(NON_INTERACTIVE_BACKOFF)
+
+
+def _antibot_reason(final_url: str, status: int, html: str) -> str:
+    """判 mp.weixin UA 正文响应是否风控/验证页; 正常/空正文/文章被删等返回空串(不算反爬)."""
+    if "mp/verifypage" in final_url or "/verify" in final_url:
+        return "被重定向到验证页(mp/verifypage)"
+    if status == 403:
+        return "HTTP 403"
+    s = html or ""
+    for m in ANTIBOT_MARKERS:
+        if m in s:
+            return f"页面含风控标记「{m}」"
+    return ""
 
 
 def _get_cookie() -> str:
@@ -119,8 +163,22 @@ def fetch_articles(cookie: str, book_id: str, reader_url: str = "",
     page_url = reader_url or "https://weread.qq.com/"
     d = _run_page_js(cookie, js, "articles", page_url)
     if d.get("errCode"):
-        logger.warning("articles errCode=%s bookId=%s", d.get("errCode"), book_id)
-        return []
+        err = d.get("errCode")
+        # -2041 = 触发腾讯防水墙/验证码: 需在真实 Edge 的阅读器页刷新过验证后才恢复
+        if err == -2041:
+            logger.warning("articles errCode=-2041(防水墙验证码) bookId=%s", book_id)
+            _antibot_wait(
+                f"articles -2041(bookId={book_id})",
+                "请到打开的 Edge 窗口刷新公众号阅读器页, 手动完成验证码/滑块",
+            )
+            d = _run_page_js(cookie, js, "articles", page_url)  # 人工处理后重试一次
+            if d.get("errCode"):
+                logger.warning("人工处理后 articles 仍 errCode=%s bookId=%s, 跳过该号",
+                               d.get("errCode"), book_id)
+                return []
+        else:
+            logger.warning("articles errCode=%s bookId=%s", err, book_id)
+            return []
     items = [it for it in d.get("items", []) if it.get("url")]
     # createTime 时间戳 → 北京日期
     for it in items:
@@ -136,7 +194,12 @@ def fetch_articles(cookie: str, book_id: str, reader_url: str = "",
 
 
 def fetch_body_ua(url: str) -> dict:
-    """UA 伪装抓 mp.weixin 正文. 返回 {"content": 纯文本, "create_time": 字符串}."""
+    """UA 伪装抓 mp.weixin 正文. 返回 {"content": 纯文本, "create_time": 字符串}.
+
+    命中风控(HTTP 403 / mp/verifypage / 风控标记页)视为反爬: 打开反爬闸门, 提示在真实
+    Edge 里打开该链接过验证后回终端按回车, 再重试一次(仍失败则返回空正文, 不阻塞后续)。
+    网络异常 / 文章被删(404 等)维持原降级, 不进闸门。
+    """
     try:
         import requests as _requests
     except Exception:
@@ -148,14 +211,29 @@ def fetch_body_ua(url: str) -> dict:
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9",
     }
-    try:
-        r = _requests.get(url, headers=headers, timeout=20)
-        if r.status_code != 200:
-            return {"content": "", "create_time": ""}
-        html = r.content.decode("utf-8", errors="replace")
-    except Exception as e:
-        logger.warning("UA抓正文异常 %s: %s", url, str(e)[:80])
+
+    def _get() -> tuple[int, str, str]:
+        """GET 正文页 → (status, final_url, html). 网络异常返回 (0, "", "")."""
+        try:
+            r = _requests.get(url, headers=headers, timeout=20)
+            return (r.status_code, r.url, r.content.decode("utf-8", errors="replace"))
+        except Exception as e:
+            logger.warning("UA抓正文异常 %s: %s", url, str(e)[:80])
+            return (0, "", "")
+
+    status, final_url, html = _get()
+    if status == 0:  # 网络异常, 原样跳过
         return {"content": "", "create_time": ""}
+    reason = _antibot_reason(final_url, status, html)
+    if reason:
+        _antibot_wait(
+            f"mp.weixin UA 正文({reason})",
+            f"请在真实 Edge 里打开该链接并完成验证/刷新后回终端按回车:\n    {url}",
+        )
+        status, final_url, html = _get()  # 人工处理后重试一次
+        if _antibot_reason(final_url, status, html):
+            logger.warning("人工处理后 UA 抓正文仍被风控, 跳过: %s", url)
+            return {"content": "", "create_time": ""}
     # 正文
     body = ""
     m = re.search(r'id="js_content"[^>]*>(.*?)</div>', html, re.S)
