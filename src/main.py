@@ -352,6 +352,8 @@ def main() -> None:
     sources = load_sources()
     all_articles = []
     fetch_summary = {}
+    # 已收录链接集合(公众号正文/网页详情抓取前提前跳过, 避免重复请求)
+    seen_links = set(state.get("processed_links", []))
 
     for source in sources:
         source_name = source.get("name", "Unknown")
@@ -362,7 +364,7 @@ def main() -> None:
             url = source.get("url", "")
             selectors = source.get("selectors", {})
             try:
-                articles = fetch_articles_from_list_page(url, selectors)
+                articles = fetch_articles_from_list_page(url, selectors, seen_links=seen_links)
             except Exception as e:
                 logger.error("网站信源 %s 抓取失败(跳过): %s", source_name, e)
                 articles = []
@@ -376,7 +378,7 @@ def main() -> None:
     gzh_sources = [x for x in sources if x.get("type") == "wechat_rss"]
     if gzh_sources:
         # 本地/本地仿真可传 account_names；默认从 sources.yaml 读公众号名
-        wechat_articles, inactive_gzh = fetch_wechat_articles()
+        wechat_articles, inactive_gzh = fetch_wechat_articles(seen_links=seen_links)
         all_articles.extend(wechat_articles)
         fetch_summary["wechat_total"] = len(wechat_articles)
         # 处理失效公众号: 记录到 deprecated_accounts.yaml + 从 sources.yaml 真删

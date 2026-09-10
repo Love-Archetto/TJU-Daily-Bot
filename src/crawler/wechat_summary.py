@@ -69,7 +69,7 @@ def _fetch_body_text(link: str, cookie: str = "") -> str:
 def enhance_wechat_articles(articles: list[dict], cookie: str = "") -> list[dict]:
     """对公众号新文章补 publish_time + content(正文).
 
-    封面 image 由 weread_mp_crawler 抓取时已写入, 此处不动。
+    封面 image 由 weread_subscribe.fetch_body_ua 抓正文时已写入, 此处不动。
     网页文章不处理, 原样保留。
 
     Args:

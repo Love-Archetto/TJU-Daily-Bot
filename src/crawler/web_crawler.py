@@ -49,7 +49,8 @@ def _make_request(url: str) -> requests.Response | None:
     return None
 
 
-def fetch_articles_from_list_page(url: str, selectors: dict[str, str]) -> list[dict[str, Any]]:
+def fetch_articles_from_list_page(url: str, selectors: dict[str, str],
+                                  seen_links: set[str] | None = None) -> list[dict[str, Any]]:
     """从列表页抓取文章信息。
 
     Args:
@@ -59,6 +60,7 @@ def fetch_articles_from_list_page(url: str, selectors: dict[str, str]) -> list[d
             {"item_container": "li"}, 从每个 li 的 <a href*='/info/'> 提取标题+链接,
             从 li 文本提取日期。
           - 传统模式: {"title": "h2 a", "link": "h2 a", "time": ".date"}
+        seen_links: 已收录链接集合; 命中的文章不再抓详情页正文(fetch_article_detail)。
 
     Returns:
         [{"title":..., "link":..., "publish_time":...}, ...]
@@ -100,7 +102,7 @@ def fetch_articles_from_list_page(url: str, selectors: dict[str, str]) -> list[d
                 "link": link,
                 "publish_time": publish_time,
             }
-            if fetch_detail and link:
+            if fetch_detail and link and (not seen_links or link not in seen_links):
                 article["content"] = fetch_article_detail(link, content_sel)
             articles.append(article)
         logger.info("Fetched %d articles (CMS-mode) from %s", len(articles), url)

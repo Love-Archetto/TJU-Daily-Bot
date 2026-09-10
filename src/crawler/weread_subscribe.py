@@ -16,6 +16,7 @@
   等待用户在 Edge/网页里刷新并完成验证后回终端按回车继续; 非交互环境(CI/管道)退避 180s。
 """
 
+import html
 import logging
 import os
 import random
@@ -193,8 +194,31 @@ def fetch_articles(cookie: str, book_id: str, reader_url: str = "",
     return items
 
 
+def _extract_cover(page_html: str) -> str:
+    """从 mp.weixin 正文页 HTML 提取封面图 URL(msg_cdn_url → cover → og:image 回退)."""
+    if not page_html:
+        return ""
+    patterns = [
+        r"msg_cdn_url\s*=\s*['\"]([^'\"]+)['\"]",
+        r"\bcover\s*=\s*['\"]([^'\"]+)['\"]",
+        r'<meta[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']',
+        r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*property=["\']og:image["\']',
+    ]
+    for pat in patterns:
+        m = re.search(pat, page_html)
+        if m:
+            url = m.group(1).strip()
+            break
+    else:
+        return ""
+    url = html.unescape(url).replace("\\/", "/")
+    if url.startswith("//"):
+        url = "https:" + url
+    return url if url.startswith("http") else ""
+
+
 def fetch_body_ua(url: str) -> dict:
-    """UA 伪装抓 mp.weixin 正文. 返回 {"content": 纯文本, "create_time": 字符串}.
+    """UA 伪装抓 mp.weixin 正文. 返回 {"content": 纯文本, "create_time": 字符串, "cover": 封面图URL}.
 
     命中风控(HTTP 403 / mp/verifypage / 风控标记页)视为反爬: 打开反爬闸门, 提示在真实
     Edge 里打开该链接过验证后回终端按回车, 再重试一次(仍失败则返回空正文, 不阻塞后续)。
@@ -203,7 +227,7 @@ def fetch_body_ua(url: str) -> dict:
     try:
         import requests as _requests
     except Exception:
-        return {"content": "", "create_time": ""}
+        return {"content": "", "create_time": "", "cover": ""}
     headers = {
         "User-Agent": WECHAT_UA,
         "Referer": "https://mp.weixin.qq.com/",
@@ -223,7 +247,7 @@ def fetch_body_ua(url: str) -> dict:
 
     status, final_url, html = _get()
     if status == 0:  # 网络异常, 原样跳过
-        return {"content": "", "create_time": ""}
+        return {"content": "", "create_time": "", "cover": ""}
     reason = _antibot_reason(final_url, status, html)
     if reason:
         _antibot_wait(
@@ -233,7 +257,7 @@ def fetch_body_ua(url: str) -> dict:
         status, final_url, html = _get()  # 人工处理后重试一次
         if _antibot_reason(final_url, status, html):
             logger.warning("人工处理后 UA 抓正文仍被风控, 跳过: %s", url)
-            return {"content": "", "create_time": ""}
+            return {"content": "", "create_time": "", "cover": ""}
     # 正文
     body = ""
     m = re.search(r'id="js_content"[^>]*>(.*?)</div>', html, re.S)
@@ -245,18 +269,21 @@ def fetch_body_ua(url: str) -> dict:
     m2 = re.search(r"createTime\s*=\s*'([^']*)'", html)
     if m2:
         ct = m2.group(1).strip()
+    # 封面
+    cover_url = _extract_cover(html)
     # 截断
     if len(body) > 1500:
         body = body[:1500]
-    return {"content": body, "create_time": ct}
+    return {"content": body, "create_time": ct, "cover": cover_url}
 
 
-def fetch_subscribed_articles(cookie: str = "") -> tuple[list[dict], list[dict]]:
+def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = None) -> tuple[list[dict], list[dict]]:
     """主入口: 书架订阅号 → articles列表 → UA正文. 返回 (articles, inactive).
 
     复用真实 Edge(CDP)拿公众号列表; 正文用 UA 伪装(fetch_body_ua)。cookie 参数已不再需要
     (登录态在 Edge 会话里), 保留仅为兼容旧签名。
-    articles: [{"title","url","publish_time","summary","source","createTime"}...]
+    seen_links: 已收录链接集合; 命中的文章不再调 fetch_body_ua 抓正文, 提前跳过(省请求/降风控)。
+    articles: [{"title","url","publish_time","summary","source","createTime","image"}...]
     inactive: 1年未更新订阅号记录(仅用于日志, 无 fakeid 概念)
     """
     from . import weread_cdp as cdp
@@ -298,6 +325,9 @@ def fetch_subscribed_articles(cookie: str = "") -> tuple[list[dict], list[dict]]
             logger.warning("订阅号[%s] 1年未更新(%s), 记失效", sub.get("name"), latest_ct)
         # 每篇文章 UA 抓正文
         for it in item_list:
+            if seen_links and it.get("url") in seen_links:
+                logger.info("跳过已收录: %s", (it.get("t") or "")[:30])
+                continue
             art = {
                 "title": it.get("t", ""),
                 "link": it.get("url", ""),
@@ -310,6 +340,7 @@ def fetch_subscribed_articles(cookie: str = "") -> tuple[list[dict], list[dict]]
                 body_info = fetch_body_ua(it["url"])
                 _sleep_interval()
                 art["content"] = body_info.get("content", "")
+                art["image"] = body_info.get("cover", "")
                 if body_info.get("create_time"):
                     art["publish_time"] = art["publish_time"] or body_info["create_time"]
             articles.append(art)

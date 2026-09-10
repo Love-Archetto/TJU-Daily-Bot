@@ -179,11 +179,16 @@ def _maybe_alert_cookie_expired(book_id: str, status: int, detail: str) -> None:
         logger.warning("发送登录失效邮件异常: %s", e)
 
 
-def fetch_wechat_articles(account_names: list[str] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def fetch_wechat_articles(account_names: list[str] | None = None,
+                          seen_links: set[str] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """抓取公众号 — 复用真实 Edge(CDP) + /web/mp/articles + UA 伪装正文.
 
     取代旧 cover(/api/mp/cover)方案与 headless+cookie 方案。仅追踪微信读书里"已订阅"的公众号。
     保持返回 (articles, inactive) 契约, 使 main.py 调用点(含 _prune_inactive_gzh)不变。
+
+    Args:
+        account_names: 保留兼容, 未使用。
+        seen_links: 已收录链接集合; 命中的文章不再抓正文(fetch_body_ua), 提前跳过。
 
     Returns:
         (articles, inactive)
@@ -192,7 +197,7 @@ def fetch_wechat_articles(account_names: list[str] | None = None) -> tuple[list[
     """
     from .weread_subscribe import fetch_subscribed_articles
     # CDP 复用真实 Edge 会话; Edge 未起/未登录时 fetch_subscribed_articles 内部会友好提示并返回空。
-    return fetch_subscribed_articles()
+    return fetch_subscribed_articles(seen_links=seen_links)
 
 
 def _fetch_article_create_time(link: str) -> str:
