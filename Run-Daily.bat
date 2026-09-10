@@ -80,10 +80,12 @@ if "%RC%"=="0" (
 
 :ok
 endlocal
+pause
 exit /b 0
 
 :fail
 echo.
 echo [TJU Daily Bot] 执行失败，见上方日志。
 endlocal
+pause
 exit /b 1
