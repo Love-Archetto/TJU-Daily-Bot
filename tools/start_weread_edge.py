@@ -3,7 +3,7 @@
 """一键拉起调试 Edge(有头)用于本地公众号抓取(CDP 复用会话).
 
 用法:  python tools/start_weread_edge.py
-作用:  用固定 --user-data-dir + --remote-debugging-port 拉起一个有头 Edge 并导航到微信读书登录页。
+作用:  用固定 --user-data-dir + --remote-debugging-port 拉起一个有头 Edge 并导航到微信读书首页。
       仅在"你是第一次"时才需要扫码: 之后 Edge 里已登录+已开阅读器页时, 直接跑主任务即可。
 
 依赖: 系统装有 Microsoft Edge。

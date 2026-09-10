@@ -89,7 +89,7 @@ def _debug_port_alive(port: int) -> bool:
 def find_or_launch_edge(port: int | None = None, profile_dir: str | None = None) -> str:
     """确保一个带调试端口的 Edge 在跑, 返回 connect_over_cdp 用的 http 地址.
 
-    若端口上已有 Edge 则复用; 否则用固定 --user-data-dir 有头拉起一个并导航到微信读书登录页。
+    若端口上已有 Edge 则复用; 否则用固定 --user-data-dir 有头拉起一个并导航到微信读书首页。
     """
     port = port or edge_port()
     dbg = f"http://127.0.0.1:{port}"
@@ -109,7 +109,7 @@ def find_or_launch_edge(port: int | None = None, profile_dir: str | None = None)
         exe,
         f"--remote-debugging-port={port}",
         f"--user-data-dir={profile_dir}",
-        "https://weread.qq.com/web/login",
+        "https://weread.qq.com/",
     ]
     logger.info("拉起调试 Edge: %s (port=%d)", exe, port)
     try:
