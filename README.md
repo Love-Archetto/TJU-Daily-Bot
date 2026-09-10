@@ -2,6 +2,7 @@
 
 每天从天津大学官方站点 + 微信公众号抓取新闻，用 AI 分类汇总成一份 Markdown 日报，并推送到远程仓库。
 
+- **自动化**：日报**只在本地跑**（`Run-Daily.bat` 一键全流程，或手动 `src/main.py`）。远端 GitHub Actions 定时任务已停用——公众号需复用真实 Edge 会话（CDP），CI 无头环境拿不到，故只保留手动 `workflow_dispatch` 触发备用
 - **网站源**：TJU 各学院官网通知页（`config/sources.yaml` 里 `type: web` 的信源）
 - **公众号源**：通过**微信读书**抓取已订阅公众号文章（`type: wechat_rss`）
 - **交付物**：`output/YYYY-MM-DD_HH-MM-SS.md` 日报 + `state.json`，推送回 git
