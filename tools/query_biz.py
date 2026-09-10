@@ -8,8 +8,8 @@
 用法：
     1. 登录 https://mp.weixin.qq.com 后台,按 F12 获取 Cookie 和 token
     2. 设置环境变量（本项目配置，见 .env.example）：
-       export WEREAD_COOKIE=<你的mp.weixin.qq.com Cookie>   # 沿用现有变量避免新增
-       或用工具内部指定的 MP_QUERY_TOKEN
+       export MP_COOKIE=<你的mp.weixin.qq.com Cookie>   # 兼容旧变量 WEREAD_COOKIE
+       export MP_QUERY_TOKEN=<mp.weixin.qq.com token>
     3. 运行：
        python tools/query_biz.py
 
@@ -104,11 +104,11 @@ def pick_best(results: list[dict], target: str) -> str:
 
 
 def main() -> None:
-    cookie = os.environ.get("WEREAD_COOKIE", "").strip()
+    cookie = (os.environ.get("MP_COOKIE") or os.environ.get("WEREAD_COOKIE") or "").strip()
     token = os.environ.get("MP_QUERY_TOKEN", "").strip()
     if not cookie or not token:
         print("请设置环境变量后运行：")
-        print("  WEREAD_COOKIE=<mp.weixin.qq.com Cookie>")
+        print("  MP_COOKIE=<mp.weixin.qq.com Cookie>   （兼容旧变量 WEREAD_COOKIE）")
         print("  MP_QUERY_TOKEN=<mp.weixin.qq.com token>")
         sys.exit(1)
 

@@ -9,3 +9,5 @@ wechat-rss-data/
 .omc/
 .claude/
 *.bak
+# 登录二维码等一次性凭据产物，不入库
+tools/_wx_login_qr.png

@@ -45,7 +45,7 @@
 | Secret 名 | 值 |
 |---|---|
 | `TJU_API_KEY` | 你的 `tk-` 开头 TJU 平台 key |
-| `WEREAD_COOKIE` | 你那整串 Cookie（`slave_user=...` 到 `...ij8A`） |
+| `WEREAD_COOKIE` | 你在 mp.weixin.qq.com 后台 F12 复制的那整串 Cookie |
 | `MP_QUERY_TOKEN` | mp.weixin.qq.com URL 里的 token 数字 |
 
 ### 告警（126 邮箱，可选但推荐）

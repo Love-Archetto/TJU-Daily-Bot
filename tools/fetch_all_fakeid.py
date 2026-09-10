@@ -4,6 +4,11 @@
 
 读 config/sources.yaml 里无 fakeid 的 wechat_rss 条目逐个查询,
 成功后回写 fakeid 到 sources.yaml。遇限流递增等待重试。
+
+凭据一律从环境变量读取(自动加载 .env), 禁止硬编码入库——
+仓库是公开的, 后台 Cookie/token 一旦提交即视为泄露:
+    MP_COOKIE=<mp.weixin.qq.com 后台 Cookie>   (兼容旧变量 WEREAD_COOKIE)
+    MP_QUERY_TOKEN=<mp.weixin.qq.com token>
 """
 import os, sys, time, re, json
 import requests
@@ -13,15 +18,15 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
 SOURCES_PATH = os.path.join(PROJECT_ROOT, "config", "sources.yaml")
 
-COOKIE = (
-    "slave_user=gh_238fb0d2dd4e; "
-    "slave_sid=RDNINHJmcGlhM2xReWJZZ3RPTnN3MThrQW1RQmhxVkFFV09oZDVhdWRfaVQwTW5zWlBsUVVERnRfQ2xMc0JoTDF2WWhTWnl0alViMDA5YVJjbTA4WUU4Z3JKUkhfRHZTR3hDX3VhTzB4UmR1T0ZOY2ozVXlkcnZWOG54UjM5ZzRJV3V4anBxcDhTb2QzeTI0; "
-    "bizuin=3696432881; data_bizuin=3696432881; "
-    "data_ticket=N9CZSz0qOvZp5RcbXgtDoAHDj4HlBT53eHvFwtjNJlye9jPLjwerT3PrjlWsLvex; "
-    "slave_bizuin=3696432881; "
-    "rand_info=CAESILNi0EXrfeilmDBri+8cIx6LZcmhVuF94oT+XoW2ij8A"
-)
-TOKEN = "332153537"
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
+except Exception:
+    pass
+
+# 凭据只经环境变量注入, 不入库
+COOKIE = (os.environ.get("MP_COOKIE") or os.environ.get("WEREAD_COOKIE") or "").strip()
+TOKEN = os.environ.get("MP_QUERY_TOKEN", "").strip()
 H = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
      "Cookie": COOKIE, "Referer": "https://mp.weixin.qq.com/"}
 
@@ -71,6 +76,11 @@ def pick_best(results, target):
 
 
 if __name__ == "__main__":
+    if not COOKIE or not TOKEN:
+        print("缺少公众号后台凭据，请先配置环境变量（或写入 .env）后运行：")
+        print("  MP_COOKIE=<mp.weixin.qq.com 后台 Cookie>")
+        print("  MP_QUERY_TOKEN=<mp.weixin.qq.com token>")
+        sys.exit(1)
     data = yaml.safe_load(open(SOURCES_PATH, encoding="utf-8"))
     sources = data["sources"]
     wechat = [s for s in sources if s.get("type") == "wechat_rss" and not s.get("fakeid")]
