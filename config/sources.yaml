@@ -22,6 +22,24 @@ sources:
   url: https://hr.tju.edu.cn/tzgg.htm
   selectors:
     item_container: li:has(a[href^='tzgg/'])
+- name: 天大网络安全学院-通知
+  type: web
+  url: https://cse.tju.edu.cn/index/tzgg.htm
+  selectors:
+    item_container: li:has(a[href*='/info/'])
+    fetch_detail: true
+- name: 天大网络安全学院-新闻
+  type: web
+  url: https://cse.tju.edu.cn/index/xyxw.htm
+  selectors:
+    item_container: li:has(a[href*='/info/'])
+    fetch_detail: true
+- name: 天大网络安全学院-学术活动
+  type: web
+  url: https://cse.tju.edu.cn/index/xshd.htm
+  selectors:
+    item_container: li:has(a[href*='/info/'])
+    fetch_detail: true
 - name: AATU天大设计总院
   type: wechat_rss
   fakeid: MzAxNTU3OTA4Mg==
