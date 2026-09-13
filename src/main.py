@@ -14,6 +14,7 @@
 import json
 import logging
 import os
+import re
 import sys
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -65,17 +66,35 @@ STATE_PATH = os.path.join(PROJECT_ROOT, "..", "state.json")
 SOURCES_PATH = os.path.join(PROJECT_ROOT, "..", "config", "sources.yaml")
 KEYWORDS_PATH = os.path.join(PROJECT_ROOT, "..", "config", "keywords.txt")
 PROFILE_PATH = os.path.join(PROJECT_ROOT, "..", "config", "user_profile.yaml")
+BOOTSTRAP_PATH = os.path.join(PROJECT_ROOT, "..", "config", "bootstrap.yaml")
+
+# 信源引导默认阈值(与 config/bootstrap.yaml 保持一致)
+DEFAULT_WINDOW_DAYS = 3
+DEFAULT_DORMANT_DAYS = 30
+
+# processed_links 上限(超出后从最旧的开始淘汰)
+MAX_PROCESSED_LINKS = 10000
 
 
 def load_state() -> dict[str, Any]:
     """加载或初始化 state.json."""
     if os.path.exists(STATE_PATH):
         with open(STATE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+            state = json.load(f)
+        if "initialized_sources" not in state:
+            # 迁移: 升级前已抓过的信源一律视为"已初始化", 否则全部老信源
+            # 会在升级后第一轮被当成新信源, 每轮只出 1 篇。
+            state["initialized_sources"] = sorted(state.get("source_last_fetch", {}).keys())
+            logger.info(
+                "state.json 迁移: 由 source_last_fetch 初始化 %d 个已有信源",
+                len(state["initialized_sources"]),
+            )
+        return state
     return {
         "last_run": "",
         "processed_links": [],
         "source_last_fetch": {},
+        "initialized_sources": [],
     }
 
 
@@ -106,6 +125,25 @@ def load_profile() -> dict[str, str]:
         return {}
     with open(PROFILE_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
+
+
+def load_bootstrap_config() -> tuple[int, int]:
+    """加载信源引导阈值 -> (window_days, dormant_days).
+
+    配置缺失或字段非法时回退默认值, 保证不会中断流水线。
+    """
+    window_days, dormant_days = DEFAULT_WINDOW_DAYS, DEFAULT_DORMANT_DAYS
+    try:
+        if os.path.exists(BOOTSTRAP_PATH):
+            with open(BOOTSTRAP_PATH, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            window_days = int(cfg.get("window_days", window_days))
+            dormant_days = int(cfg.get("dormant_days", dormant_days))
+    except Exception as e:
+        logger.warning("bootstrap.yaml 读取失败, 使用默认值 %d/%d: %s",
+                       DEFAULT_WINDOW_DAYS, DEFAULT_DORMANT_DAYS, e)
+        return DEFAULT_WINDOW_DAYS, DEFAULT_DORMANT_DAYS
+    return window_days, dormant_days
 
 
 def is_new_article(article: dict, state: dict) -> bool:
@@ -231,6 +269,7 @@ def generate_report(
     part3: list[dict],
     profile: dict,
     checker_result: dict | None = None,
+    bootstrap_notes: list[dict] | None = None,
 ) -> str:
     """生成 Markdown 报告."""
     now = beijing_now().strftime("%Y-%m-%d %H:%M:%S")
@@ -301,6 +340,24 @@ def generate_report(
         lines.append("> 本日无其余信息。")
         lines.append("")
 
+    # 信源引导说明: 只给计数, 不带标题/链接, 避免干扰独立检查的"有效链接"判定
+    if bootstrap_notes:
+        lines.extend([
+            f"---",
+            f"",
+            f"## 信源引导 ({len(bootstrap_notes)} 个)",
+            f"",
+            f"> 以下信源为首次收录或长期失效后恢复，为免历史旧文刷屏，仅保留最新 1 篇"
+            f"及近期文章，其余已标记为已收录。",
+            f"",
+        ])
+        for n in bootstrap_notes:
+            lines.append(
+                f"- **{n['source']}**（{n['reason']}）：保留最新 1 篇 + 近 "
+                f"{n.get('window_days', DEFAULT_WINDOW_DAYS)} 天，跳过 {n['skipped']} 篇历史文章"
+            )
+        lines.append("")
+
     # 检查报告
     if checker_result:
         lines.extend([
@@ -327,13 +384,151 @@ def update_index(articles: list[dict], output_file: str) -> None:
         handler.index_article(article)
 
 
+# 发布时间: 兼容 '2026-9-3'(网站源 _extract_date) 与 '2026-09-03 10:31'(公众号)
+_PUBLISH_TS_RE = re.compile(
+    r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[\sT]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?"
+)
+
+
+def _parse_publish_ts(s: str) -> datetime | None:
+    """宽松解析发布时间, 解析失败返回 None(调用方回退抓取顺序)."""
+    if not s:
+        return None
+    m = _PUBLISH_TS_RE.search(str(s))
+    if not m:
+        return None
+    try:
+        return datetime(
+            int(m.group(1)), int(m.group(2)), int(m.group(3)),
+            int(m.group(4) or 0), int(m.group(5) or 0), int(m.group(6) or 0),
+            tzinfo=_BEIJING_TZ,
+        )
+    except ValueError:
+        return None
+
+
+def _newest_article(articles: list[dict]) -> dict:
+    """取最新一篇: 有可解析时间的取时间最大者; 全部无时间时回退抓取顺序第 1 篇.
+
+    两个爬虫的列表页(TRS-CMS 列表、微信读书订阅列表)都是最新在前。
+    """
+    best = articles[0]
+    best_ts = _parse_publish_ts(best.get("publish_time", ""))
+    for a in articles[1:]:
+        ts = _parse_publish_ts(a.get("publish_time", ""))
+        if ts is None:
+            continue
+        if best_ts is None or ts > best_ts:
+            best, best_ts = a, ts
+    return best
+
+
+def _bootstrap_sources(
+    sources: list[dict], state: dict, now: datetime, dormant_days: int
+) -> set[str]:
+    """抓取前算出本轮需要"信源引导"的信源名集合.
+
+    规则(满足其一):
+      1. 全新信源 — 不在 state["initialized_sources"] 中
+      2. 恢复信源 — 已初始化, 但距上次成功抓到文章超过 dormant_days
+
+    必须在抓取循环之前调用: 抓取过程会写 source_last_fetch,
+    晚算会让全新信源看起来"刚抓过"。
+    """
+    initialized = set(state.get("initialized_sources", []))
+    last_fetch = state.get("source_last_fetch", {})
+    boot: set[str] = set()
+    for src in sources:
+        name = src.get("name", "")
+        if not name:
+            continue
+        if name not in initialized:
+            boot.add(name)
+            continue
+        ts = _parse_publish_ts(last_fetch.get(name, ""))
+        if ts is not None and now - ts > timedelta(days=dormant_days):
+            boot.add(name)
+    return boot
+
+
+def _apply_source_bootstrap(
+    all_articles: list[dict],
+    new_articles: list[dict],
+    boot_set: set[str],
+    state: dict,
+    window_days: int,
+    now: datetime,
+) -> tuple[list[dict], list[dict]]:
+    """信源引导: boot_set 中的信源只保留最新 1 篇 + 近 window_days 天, 其余标记已收录.
+
+    就地改写 state["processed_links"] / state["initialized_sources"], 由调用方既有的
+    save_state 统一落盘(不新增落盘点); 中途崩溃则磁盘未变, 下轮重走引导。
+
+    Returns:
+        (过滤后的 new_articles, [{"source","kept","skipped","reason"}, ...])
+        仅当真的跳过了文章时才产出记录。
+    """
+    if not boot_set:
+        return new_articles, []
+
+    initialized = set(state.setdefault("initialized_sources", []))
+    processed = state.setdefault("processed_links", [])
+    processed_set = set(processed)
+
+    # 按信源分组(只保留有链接的, 空链接既不判定也不写入 processed_links)
+    by_source: dict[str, list[dict]] = {}
+    for a in all_articles:
+        src = a.get("source", "")
+        if src in boot_set and a.get("link"):
+            by_source.setdefault(src, []).append(a)
+
+    dropped: set[tuple[str, str]] = set()
+    records: list[dict] = []
+    cutoff = now - timedelta(days=window_days)
+    for src, arts in by_source.items():
+        reason = "失效恢复" if src in initialized else "首次收录"
+        if not any(_parse_publish_ts(a.get("publish_time", "")) for a in arts):
+            logger.warning(
+                "信源引导[%s]: 发布时间全部无法解析, 仅保留抓取顺序第 1 篇", src)
+
+        newest = _newest_article(arts)
+        marked = 0
+        for a in arts:
+            if a is newest:
+                continue
+            ts = _parse_publish_ts(a.get("publish_time", ""))
+            if ts is not None and ts >= cutoff:
+                continue  # 窗口内, 一并收录
+            dropped.add((src, a["link"]))
+            if a["link"] not in processed_set:
+                processed.append(a["link"])
+                processed_set.add(a["link"])
+                marked += 1
+
+        initialized.add(src)
+        if marked:
+            records.append({"source": src, "kept": newest.get("link", ""),
+                            "skipped": marked, "reason": reason,
+                            "window_days": window_days})
+
+    if initialized != set(state["initialized_sources"]):
+        state["initialized_sources"] = sorted(initialized)
+
+    filtered = [
+        a for a in new_articles
+        if (a.get("source", ""), a.get("link", "")) not in dropped
+    ]
+    return filtered, records
+
+
 def main() -> None:
     """主流程."""
     logger.info("TJU Daily Bot starting...")
 
     # 1. 加载状态
     state = load_state()
-    now = beijing_now().isoformat()
+    now_dt = beijing_now()
+    now = now_dt.isoformat()  # 写入 state 的时间戳用 ISO 字符串
     is_ci = os.environ.get("CI", "").lower() == "true"
 
     # 1.5 一天一次闸门(替代旧的2h控闸): cron 每30min触发, 但当天(北京4:00~次日4:00)
@@ -354,6 +549,12 @@ def main() -> None:
     fetch_summary = {}
     # 已收录链接集合(公众号正文/网页详情抓取前提前跳过, 避免重复请求)
     seen_links = set(state.get("processed_links", []))
+    # 信源引导阈值 + 本轮待引导信源。必须在抓取前算: 抓取过程会写 source_last_fetch,
+    # 晚算会让全新信源看起来"刚抓过", 从而漏掉引导。
+    window_days, dormant_days = load_bootstrap_config()
+    boot_set = _bootstrap_sources(sources, state, now_dt, dormant_days)
+    if boot_set:
+        logger.info("待引导信源 %d 个: %s", len(boot_set), ", ".join(sorted(boot_set)))
 
     for source in sources:
         source_name = source.get("name", "Unknown")
@@ -372,7 +573,10 @@ def main() -> None:
                 a["source"] = source_name
             all_articles.extend(articles)
             fetch_summary[source_name] = len(articles)
-            state["source_last_fetch"][source_name] = now
+            # 只在真正抓到内容时更新时间戳(该字段代表"最后一次成功抓到文章",
+            # 用于判定信源是否"失效后恢复"; 列表页即使全部已收录也会返回条目)
+            if articles:
+                state["source_last_fetch"][source_name] = now
 
     # 3. 公众号批量抓取（微信读书 cover, 顺带判定 2 年未更新失效号）
     gzh_sources = [x for x in sources if x.get("type") == "wechat_rss"]
@@ -384,11 +588,21 @@ def main() -> None:
         # 处理失效公众号: 记录到 deprecated_accounts.yaml + 从 sources.yaml 真删
         if inactive_gzh:
             _prune_inactive_gzh(inactive_gzh, sources)
-        for name in [x.get("name") for x in gzh_sources]:
-            state["source_last_fetch"][name] = now
+        # 只给本轮真正返回文章的号更新"最后成功抓到文章"时间戳
+        for name in {a.get("source") for a in wechat_articles if a.get("link")}:
+            if name:
+                state["source_last_fetch"][name] = now
 
     # 3. 增量过滤
     new_articles = [a for a in all_articles if is_new_article(a, state)]
+    # 3.5 信源引导: 新加入/失效恢复的信源只保留最新 1 篇 + 近 N 天, 其余标记为已收录,
+    #     避免新信源的历史旧文一次性涌入简报
+    new_articles, bootstrap_records = _apply_source_bootstrap(
+        all_articles, new_articles, boot_set, state, window_days, now_dt)
+    for r in bootstrap_records:
+        log = logger.warning if r["skipped"] > 50 else logger.info
+        log("信源引导[%s](%s): 保留最新 1 篇 + 近 %d 天, 跳过 %d 篇历史文章(已标记已收录)",
+            r["source"], r["reason"], window_days, r["skipped"])
     logger.info("Total: %d, New: %d", len(all_articles), len(new_articles))
 
     if not new_articles:
@@ -415,7 +629,8 @@ def main() -> None:
     part1, part2, part3 = _ai_rank_and_summarize(new_articles, keywords, profile)
 
     # 7. 生成报告
-    report = generate_report(part1, part2, part3, profile)
+    report = generate_report(part1, part2, part3, profile,
+                             bootstrap_notes=bootstrap_records)
 
     # 7. 独立检查
     try:
@@ -426,7 +641,8 @@ def main() -> None:
         checker_result = None
 
     # 重新生成带检查结果的报告
-    final_report = generate_report(part1, part2, part3, profile, checker_result)
+    final_report = generate_report(part1, part2, part3, profile, checker_result,
+                                   bootstrap_notes=bootstrap_records)
 
     # 8. 写入输出文件
     timestamp = beijing_now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -442,9 +658,10 @@ def main() -> None:
         if a.get("link") and a["link"] not in state["processed_links"]:
             state["processed_links"].append(a["link"])
     state["last_run"] = now
-    # 限制 processed_links 大小
-    if len(state["processed_links"]) > 5000:
-        state["processed_links"] = state["processed_links"][-5000:]
+    # 限制 processed_links 大小。上限过小(旧值 5000)会在约十几天后开始淘汰仍挂在
+    # 列表页上的旧链接, 导致旧文被重复收录。
+    if len(state["processed_links"]) > MAX_PROCESSED_LINKS:
+        state["processed_links"] = state["processed_links"][-MAX_PROCESSED_LINKS:]
     save_state(state)
 
     # 10. 更新搜索索引

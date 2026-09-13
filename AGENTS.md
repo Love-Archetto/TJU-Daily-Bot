@@ -268,13 +268,34 @@
   "source_last_fetch": {
     "官网-通知公告": "2026-08-28T08:00:00",
     "天大官微": "2026-08-28T08:00:00"
-  }
+  },
+  "initialized_sources": [
+    "官网-通知公告",
+    "天大官微"
+  ],
+  "last_daily_date": "2026-08-28",
+  "last_summary_date": "2026-08-28",
+  "last_summary_time": "2026-08-28T08:00:00"
 }
 ```
 
 - `last_run`：上次抓取的时间戳
-- `processed_links`：全局已处理链接集合
-- `source_last_fetch`：每个信源的最后抓取时间
+- `processed_links`：全局已处理链接集合。上限 `MAX_PROCESSED_LINKS`（`src/main.py`，当前 10000），超出后从**最旧的**开始淘汰
+- `source_last_fetch`：每个信源的**最后一次成功抓到文章**的时间（抓取失败或返回空时不更新）。用于判定"失效后恢复"
+- `initialized_sources`：已初始化过的信源名列表。不在其中的信源视为**新加入**；已初始化但 `source_last_fetch` 距今超过 `config/bootstrap.yaml` 的 `dormant_days`（默认 30 天）视为**失效后恢复**
+- `last_daily_date`：一天一次闸门的日期（北京 4:00 为界）
+- `last_summary_date` / `last_summary_time`：每日总结的幂等标记
+
+### 8.15 信源引导（新信源 / 恢复信源的首轮收录）
+
+新加入或失效后恢复的信源，首轮只收录**最新 1 篇 + 最近 `window_days` 天内发布的文章**
+（`config/bootstrap.yaml`，默认 3 天），该信源其余历史文章的有效链接直接写入
+`processed_links` 标记为已收录，避免新号的历史旧文一次性涌入简报。
+
+- 判定在**抓取之前**完成（`_bootstrap_sources`），过滤在增量过滤之后、空结果早退之前完成（`_apply_source_bootstrap`），因此判定结果在整轮内唯一
+- 所有状态改动都在内存中完成，由既有的 `save_state` 统一落盘，不新增落盘点
+- 报告末尾会输出 `## 信源引导` 段（只给计数，不带标题和链接）
+
 
 ---
 
