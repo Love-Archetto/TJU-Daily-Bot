@@ -52,7 +52,8 @@ from src.crawler.weread_mp_crawler import fetch_wechat_articles, get_weread_cook
 from src.crawler.wechat_summary import enhance_wechat_articles
 from src.ai_engine.fault_tolerant_client import FaultTolerantClient
 from src.ai_engine.independent_checker import IndependentChecker
-from tui.local_git import commit_and_push
+from tui.local_git import (MAIN_BRANCH, commit_data_and_push, current_branch,
+                           ensure_on_main, path_in_head)
 from tui.search_handler import SearchHandler
 
 logging.basicConfig(
@@ -99,9 +100,29 @@ def load_state() -> dict[str, Any]:
 
 
 def save_state(state: dict[str, Any]) -> None:
-    """保存 state.json."""
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
+    """保存 state.json —— 原子写: 先写同目录 .tmp, fsync 后 os.replace 换名.
+
+    非原子写(直接 open(w))在写到一半被中断时(断电/强杀/容器回收/磁盘满)会留下
+    截断的 JSON, 下一轮 load_state 的 json.load 直接抛异常, 整条流水线起不来。
+    os.replace 在同一文件系统上是原子的: 读者要么看到旧的完整内容, 要么看到新的
+    完整内容, 不存在中间的半截状态。
+    """
+    tmp_path = STATE_PATH + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())   # 保证内容先落盘, 再换名
+    os.replace(tmp_path, STATE_PATH)
+
+
+def _state_missing_but_tracked() -> bool:
+    """state.json 不在磁盘上、但 HEAD 里有它 → 异常状态(而非全新仓库).
+
+    单独抽出来是为了能直接测试: 为了验证这个判据去跑 main() 会真的发起抓取。
+    """
+    return (not os.path.exists(STATE_PATH)
+            and path_in_head("state.json")
+            and os.environ.get("ALLOW_STATE_RESET") != "1")
 
 
 def load_sources() -> list[dict[str, Any]]:
@@ -521,15 +542,54 @@ def _apply_source_bootstrap(
     return filtered, records
 
 
-def main() -> None:
-    """主流程."""
+def main() -> int:
+    """主流程.
+
+    退出码: 0 = 成功且已确认远端 main 前进; 1 = 硬失败(守卫拒绝/git 不可用/切不过去);
+    2 = 报告已生成但没推上去(数据在本地, 补一次 push 即可)。
+    """
     logger.info("TJU Daily Bot starting...")
+
+    # 0. 分支守卫 —— 必须早于 load_state():
+    #    读 state.json/config/ 与写、推必须是同一条 lineage, 否则提交会落在错误分支上,
+    #    而 push 写死 origin main, 结果是"看着成功、远端没动"。放提交前才切则机械上做不到:
+    #    那时本轮已把 state.json 写脏, 而它在 main 与特性分支上内容必然不同,
+    #    checkout 必报 "local changes would be overwritten"。
+    is_ci = os.environ.get("CI", "").lower() == "true"
+    is_gha = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
+    if is_ci:
+        if is_gha and os.environ.get("ALLOW_BRANCH_SWITCH") != "1":
+            # GHA 里的分支是操作者显式选的, 替他静默改写等于重演我们要消灭的病
+            branch = current_branch()
+            if branch != MAIN_BRANCH:
+                logger.error("HEAD 在 %s, 请从 %s 触发", branch, MAIN_BRANCH)
+                return 1
+        else:
+            guard = ensure_on_main()
+            if not guard["success"]:
+                logger.error("分支守卫失败, 中止: %s", guard["message"])
+                return 1
+
+    # 0.5 state.json 完整性守卫 —— 同样必须早于 load_state():
+    #     state.json 不在磁盘上、但本仓库 HEAD 里有它 → 这是异常(被误删/被 clean
+    #     掉/工作区不完整), 不是"全新仓库"。此时 load_state() 会返回一份空的
+    #     processed_links, 本轮结束再经 _finalize_and_push 把它提交推送到 main,
+    #     把数千条去重记录整体抹掉 —— 与"state.json 被清空"是同一种破坏, 而且
+    #     推送校验会理所当然地判它成功(远端确实前进了)。
+    #     宁可中止让人看一眼, 也不静默重置历史。确认要重置时设 ALLOW_STATE_RESET=1。
+    if _state_missing_but_tracked():
+        logger.error(
+            "state.json 不在磁盘上, 但本仓库 HEAD 里有它 —— 属异常状态, 已中止。"
+            "用空状态继续会重置去重历史并推送覆盖远端, 请先执行 "
+            "`git checkout -- state.json` 恢复后重跑; "
+            "确实想从零开始时, 设 ALLOW_STATE_RESET=1 再跑"
+        )
+        return 1
 
     # 1. 加载状态
     state = load_state()
     now_dt = beijing_now()
     now = now_dt.isoformat()  # 写入 state 的时间戳用 ISO 字符串
-    is_ci = os.environ.get("CI", "").lower() == "true"
 
     # 1.5 一天一次闸门(替代旧的2h控闸): cron 每30min触发, 但当天(北京4:00~次日4:00)
     #    已运行则跳过。触发时进入执行前立即写 last_daily_date(中途失败下次也跳过)。
@@ -537,8 +597,16 @@ def main() -> None:
     force = os.environ.get("RUN_FORCE", "") == "true" or os.environ.get("FORCE", "") == "1"
     today_window = _daily_window_date()
     if state.get("last_daily_date") == today_window and not force:
-        logger.info("当天(%s)已运行过, 跳过", today_window)
-        return
+        logger.info("当天(%s)已运行过, 跳过抓取", today_window)
+        # 跳过抓取 ≠ 跳过收尾: 上一轮可能在"写盘之后、推送之前"崩过, 产物还留在本地
+        # (这正是退出码 2 描述的那种状态)。这里仍走一次收尾把遗留的 output/ +
+        # state.json 补推上去; 确实没东西可推时, commit_data_and_push 会返回
+        # "Nothing to commit" 并做一次幂等的 push + ls-remote 校验, 代价只是一次网络往返。
+        # 提交信息用窗口日而非日历日: 本窗口内的日界是 _daily_window_date()
+        # (北京 4:00~次日 4:00), 与 _maybe_daily_summary 的 last_summary_date 同一把尺。
+        # 00:00~04:00 之间日历日已翻篇而窗口日没有, 用日历日会把上一个窗口的遗留产物
+        # 标成新的一天。
+        return _finalize_and_push(state, is_ci, f"daily report {today_window}")
     # 触发即写: 进入执行前立即标记"当天已运行"(即使中途失败, 后续30min触发也跳过)
     state["last_daily_date"] = today_window
     save_state(state)
@@ -609,10 +677,10 @@ def main() -> None:
         logger.info("No new articles, skipping report generation")
         # 即便本轮无新文章, 也更新 last_run(作为 2h 控闸基准)
         state["last_run"] = now
-        # 北京6点后仍未生成当天总结则生成(可能当天已有历史报告)
-        _maybe_daily_summary(state)
-        save_state(state)
-        return
+        # 北京6点后仍未生成当天总结则生成(可能当天已有历史报告)。
+        # 汇总会新建 output/summary/*.md, 同样必须走推送收尾 —— 否则那天的汇总
+        # 永远只留在本地。日期同样用窗口日, 与汇总文件 output/summary/<窗口日>.md 对齐。
+        return _finalize_and_push(state, is_ci, f"daily report {today_window}")
 
     # 4. 加载关键词和用户画像
     keywords = load_keywords()
@@ -667,15 +735,45 @@ def main() -> None:
     # 10. 更新搜索索引
     update_index(new_articles, output_filename)
 
-    # 11. CI 环境自动推送
-    if is_ci:
-        result = commit_and_push(f"daily report {beijing_now().strftime('%Y-%m-%d')}")
-        logger.info("CI push: %s", result)
-
-    # 12. 北京6点后仍未生成当天总结则生成并发邮件(独立于本轮有无新文章)
-    _maybe_daily_summary(state)
+    # 11. 收尾: 汇总 -> save -> 提交推送(汇总必须在推送之前, 否则它只能等下一轮捎带)
+    #     日期用窗口日, 与 _maybe_daily_summary 划的"天"是同一把尺。
+    rc = _finalize_and_push(state, is_ci, f"daily report {today_window}")
+    if rc != 0:
+        return rc
 
     logger.info("TJU Daily Bot finished.")
+    return 0
+
+
+def _finalize_and_push(state: dict, is_ci: bool, message: str) -> int:
+    """收尾: 生成当天汇总 -> 落盘 state -> (CI 下)提交推送并校验远端.
+
+    _maybe_daily_summary 会新建 output/summary/*.md 并写 state["last_summary_date"],
+    所以它必须在提交之前跑, 否则那份汇总赶不上当次 data: 提交。
+
+    Returns:
+        0 = 无需推送(非 CI) 或推送并已确认远端前进;
+        2 = 报告已落盘但没同步到远端(数据仍在本地, 补一次 push 即可)。
+    """
+    _maybe_daily_summary(state)
+    save_state(state)
+
+    if not is_ci:
+        return 0
+
+    result = commit_data_and_push(message)
+    if result.get("success"):
+        logger.info("推送成功: %s", result["message"])
+        return 0
+
+    logger.error("推送失败(报告已落盘但未同步远端): %s", result["message"])
+    try:
+        from src.notifier import send_alert
+        send_alert("❌ TJU Daily Bot 推送失败", str(result["message"]))
+    except Exception as e:
+        # SMTP 没配也不该影响退出码: 邮件只是辅助通知
+        logger.warning("推送失败通知未发出: %s", e)
+    return 2
 
 
 def _maybe_daily_summary(state: dict) -> str | None:
@@ -883,4 +981,5 @@ def _parse_dt(s: str):
 
 
 if __name__ == "__main__":
-    main()
+    # 退出码必须传出去: Run-Daily.bat / Actions 靠它区分"真推上去了"和"看着成功"
+    sys.exit(main())

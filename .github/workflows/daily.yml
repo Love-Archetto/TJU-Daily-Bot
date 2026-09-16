@@ -9,6 +9,16 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # 分支守卫: data 提交只允许落在 main。GHA 里分支是操作者显式选的, 不替他改
+      # (静默改写分支正是本仓库出过的 bug 形态), 而是 2 秒内快速失败, 避免在错分支上
+      # 白跑五分钟抓取。本地 Run-Daily.bat 路径相反: 那里的分支是"事故", 见
+      # tui/local_git.py 的 ensure_on_main() —— 会自动切回 main。
+      - name: 分支守卫 (只允许 main)
+        if: github.ref_name != 'main'
+        run: |
+          echo "::error::请从 main 分支触发(当前: ${{ github.ref_name }})"
+          exit 1
+
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
         with:
@@ -47,18 +57,37 @@ jobs:
           SMTP_FROM: ${{ secrets.SMTP_FROM }}
           NOTIFY_TO: ${{ secrets.NOTIFY_TO }}
 
-      - name: Push output/ and state.json
+      # 抢救步骤: 提交+推送的主写手已是 main.py 自己(见 tui/local_git.py 的
+      # commit_data_and_push, 自带 push 后 ls-remote 校验)。正常情况下这里
+      # git diff --cached 为空, 什么都不做; 只有 main.py 中途崩溃、留下未提交产物时
+      # 才有活干。刻意不用 set +e / || echo: 推失败必须让 job 变红, 不许被吞。
+      - name: 抢救未提交产物 (仅 main.py 崩溃时有活干)
+        if: always() && github.ref_name == 'main'
         run: |
-          set +e
           git config user.name "TJU Bot"
           git config user.email "bot@tju.edu"
           mkdir -p output output/summary
-          [ -f state.json ] || echo '{}' > state.json
-          git add output/ state.json 2>/dev/null || true
-          if ! git diff --cached --quiet; then
-            git commit -m "data: daily report $(date +%Y-%m-%d)" || echo "No changes to commit"
-            git pull --rebase origin main || echo "Conflict, skip push"
-            git push origin main || echo "Push failed, check manually"
+          # state.json 必须是"缺失或合法 JSON"才带上, 否则只抢救 output/:
+          # main.py 可能崩在写 state.json 的中间(留下半截 JSON), 也可能是
+          # 逻辑出错写出一份缺字段的 state。带上去会把去重记录覆盖坏, 而
+          # 报告文件本身没有这个问题, 不该被子系统连累。
+          if [ -f state.json ] && python -c "import json;json.load(open('state.json',encoding='utf-8'))" 2>/dev/null; then
+            git add output/ state.json
           else
-            echo "No changes to commit"
+            echo "::warning::state.json 缺失或不是合法 JSON, 只抢救 output/(不覆盖去重记录)"
+            git add output/
           fi
+          if git diff --cached --quiet; then
+            echo "无未提交产物, 跳过"
+            exit 0
+          fi
+          git commit -m "data: salvage $(date +%Y-%m-%d)"
+          # --autostash: main.py 可能把 config/sources.yaml 等非 AUTO_PATHS 文件改脏
+          # (见 _prune_inactive_gzh), 它们不进本次提交, 但会挡住 rebase。
+          git pull --rebase --autostash origin main
+          git push origin main
+          # 断言远端真的前进了, 防"push 返回 0 但远端没动"的假成功
+          remote=$(git ls-remote origin refs/heads/main | cut -f1)
+          local=$(git rev-parse HEAD)
+          echo "remote/main=$remote  local=$local"
+          [ "$remote" = "$local" ] || { echo "::error::推送后远端 main 与本地 HEAD 不一致"; exit 1; }

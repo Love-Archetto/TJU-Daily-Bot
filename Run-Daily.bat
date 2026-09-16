@@ -71,12 +71,24 @@ if "%RC%"=="0" (
     echo   最新报告见：output\ 目录
     echo ============================================
     goto :ok
-) else (
+)
+if "%RC%"=="2" (
     echo.
-    echo [错误] 主流程返回错误码 %RC%。
-    echo        检查上方日志。常见原因：未配 API Key / 调试 Edge 未登录 / 网络 / git 凭据。
+    echo ============================================
+    echo   [警告] 报告已生成，但推送到 GitHub 失败。
+    echo   数据仍在本地（output\ + state.json），未同步到远端 main。
+    echo   请确认网络/凭据后手动执行： git push origin main
+    echo ============================================
     goto :fail
 )
+echo.
+echo [错误] 主流程返回错误码 %RC%。
+echo        常见原因：
+echo          - 分支守卫拒绝：当前不在 main，且工作区有未提交改动（上方有脏文件清单，
+echo            按提示先 git stash 或先提交，或干完活再跑）
+echo          - 未配 API Key / 调试 Edge 未登录 / 网络 / git 凭据
+echo        详见上方日志。
+goto :fail
 
 :ok
 endlocal

@@ -51,6 +51,9 @@ GitHub Actions (cron)          Local TUI (Textual)
 3. **WeChat source**: 只在 GitHub Actions 内跑 we-mp-rss 容器（service + actions/cache 持久化数据卷）。`main.py` 从 `WE_MP_RSS_BASE`（默认 `http://localhost:8001`）拉公众号 RSS。本地不装 we-mp-rss。
 4. **Model degradation**: Function Calling first → on error, retry without `tools` param → natural language mode with JSON repair (`jsonrepair` + regex) → max 2 retries.
 5. **Push separation**: `output/` + `state.json` auto-pushed by Actions; `config/` only by TUI button; `history/` never pushed. Reports never deleted → history stays complete for local search.
+6. **Branch invariant**: 自动流程（`CI=true` 的 `main.py`）产生的 `data:` 提交**只允许落在 `main`**。本地 `Run-Daily.bat` 发现 HEAD 不在 main 时：工作区干净 → 自动 `checkout main` 再跑；有未提交改动 → **拒绝退出**（exit 1，绝不 stash）。GHA 不自动切，非 main 触发直接失败。推送后用 `ls-remote` 比对远端 SHA —— 防"`git push` 返回 0 但远端没动"的假成功。退出码：`0` 成功 / `1` 硬失败 / `2` 报告已生成但未推送。
+7. **Do NOT use `--force`**（任何形式，含 `--force-with-lease`）—— 与约束 1 同源，此处单独强调：non-fast-forward 的恢复手段是 `pull --rebase` 后重试，不是强推。
+8. **state.json 完整性**: 它是去重历史的唯一载体（`processed_links` 数千条），被清空的后果是整轮重复处理 + 用空历史覆盖远端。因此：写入必须原子（`save_state` 走同目录 `.tmp` + `os.replace`，防截断 JSON）；磁盘上缺失但 `HEAD` 里有它 → 视为异常**中止**而非从零开始（确实要重置时设 `ALLOW_STATE_RESET=1`）；`commit_data_and_push` 遇到不存在的路径按单个跳过，不让 `git add` 整体失败。
 
 ## Commands
 
@@ -63,6 +66,10 @@ python src/main.py
 
 # Simulate Actions environment
 CI=true python src/main.py
+
+# Git 提交/推送流程的回归测试（零网络、零鉴权，全部在 tempfile 建的裸库夹具里跑，
+# 不触碰真实 .git 与 origin）。改 tui/local_git.py 或 main.py 的收尾逻辑后必须跑。
+python tools/test_git_flow.py
 
 # Generate missing fakeid for WeChat sources (once, pre-seeded with a valid Cookie)
 python tools/query_biz.py
@@ -79,4 +86,4 @@ Only these exact matches are treated as commands (everything else is chat input)
 |---|---|
 | `/load_history` | Load last conversation from `history/` |
 | `/save` | Save current conversation + config (no Git) |
-| `/quit` | Save + Commit & Push, then exit |
+| `/quit` | Save conversation, then exit (**不碰 Git** — 实测 `tui/app.py` 里只有 `save_history()` + `exit()`，无任何 git 调用) |
