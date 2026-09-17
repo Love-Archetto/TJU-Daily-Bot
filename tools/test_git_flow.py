@@ -601,16 +601,23 @@ def scenario_j() -> None:
     rel = f"output/summary/{today}.md"
 
     saved = m._maybe_daily_summary
+    saved_state_path = m.STATE_PATH
 
     def fake_summary(state):
         write(os.path.join(_work, rel), f"# summary {today}\n")
         return os.path.join(_work, rel)
 
     m._maybe_daily_summary = fake_summary
+    # STATE_PATH 也必须重定向进夹具: _finalize_and_push 会调**真实**的 save_state,
+    # 而它写的是 m.STATE_PATH。只 patch _maybe_daily_summary 而漏掉这一条, 真实
+    # state.json 就会被那份空 state 覆盖成 `{}` —— 这正是本仓库发生过的事故
+    # (202251 字节 -> 2 字节), 而且当时套件仍然报 ALL PASS。
+    m.STATE_PATH = os.path.join(_work, "state.json")
     try:
         rc = m._finalize_and_push({}, True, "test J")
     finally:
         m._maybe_daily_summary = saved
+        m.STATE_PATH = saved_state_path
 
     check(f"{name} — _finalize_and_push 返回 0", rc == 0, f"rc={rc}")
     files = bare_tree_files(_bare)
@@ -834,9 +841,139 @@ def _assert_under_tmp(path: str, what: str) -> str:
     return real
 
 
+# --------------------------------------------------------------------------
+# 真实仓库数据护栏
+#
+# 缘起: 本仓库已两次出现「测试把真实 state.json 清空」的事故 —— 202251 字节、
+# 3216 条 processed_links 只剩一个 `{}`, 而两次测试套件都报 **ALL PASS**:
+# 绿的自检完全没察觉自己顺手毁了被测对象。
+#   第一次: 为了模拟 _finalize_and_push, import 了 src.main 却没 patch
+#           commit_data_and_push, 结果真的 commit + push 到真实远端。
+#   第二次: 场景 J patch 了 _maybe_daily_summary, 却漏了 save_state ——
+#           _finalize_and_push({}) 里的真实 save_state 把 `{}` 写进真实仓库。
+# 结论: 靠"每个场景自觉重定向"是不可靠的。必须有一道全局闸门, 让"写真实数据
+# 文件"这件事直接抛异常。所以下面在 main() 一开始就装上它。
+# --------------------------------------------------------------------------
+_REAL_STATE = os.path.realpath(os.path.join(REPO_ROOT, "state.json"))
+_REAL_OUTPUT = os.path.realpath(os.path.join(REPO_ROOT, "output")) + os.sep
+
+
+def _is_real_repo_data(path) -> bool:
+    """该路径是否指向真实仓库的数据文件(state.json 及其 .tmp / output/ 下)."""
+    try:
+        real = os.path.realpath(os.fspath(path))
+    except (TypeError, ValueError):
+        return False
+    return (real == _REAL_STATE or real.startswith(_REAL_STATE + ".")
+            or real.startswith(_REAL_OUTPUT))
+
+
+def real_state_fingerprint() -> str:
+    """真实仓库 state.json 的原始字节指纹(绕开 checkout 的行尾转换)."""
+    return git("-C", REPO_ROOT, "hash-object", "state.json", cwd=REPO_ROOT)[1].strip()
+
+
+def install_real_repo_write_guard() -> None:
+    """把对真实仓库数据文件的写入/删除/覆盖变成异常, 而不是静默得逞."""
+    import builtins
+
+    real_open, real_remove = builtins.open, os.remove
+    real_replace, real_rename = os.replace, os.rename
+
+    def guarded_open(file, mode="r", *a, **kw):
+        if any(c in str(mode) for c in "wax+") and _is_real_repo_data(file):
+            raise RuntimeError(f"护栏拦下对真实仓库数据文件的写入: {file}")
+        return real_open(file, mode, *a, **kw)
+
+    def guarded_remove(path, *a, **kw):
+        if _is_real_repo_data(path):
+            raise RuntimeError(f"护栏拦下对真实仓库数据文件的删除: {path}")
+        return real_remove(path, *a, **kw)
+
+    def guarded_replace(src, dst, *a, **kw):
+        if _is_real_repo_data(dst):
+            raise RuntimeError(f"护栏拦下对真实仓库数据文件的覆盖: {dst}")
+        return real_replace(src, dst, *a, **kw)
+
+    def guarded_rename(src, dst, *a, **kw):
+        if _is_real_repo_data(dst):
+            raise RuntimeError(f"护栏拦下对真实仓库数据文件的重命名: {dst}")
+        return real_rename(src, dst, *a, **kw)
+
+    builtins.open = guarded_open
+    os.remove = guarded_remove
+    os.replace = guarded_replace
+    os.rename = guarded_rename
+
+
+def scenario_p() -> None:
+    """护栏自检: 证明它真的会拦, 而不是一段永远不触发的摆设.
+
+    自检本身绝不能成为事故源: 第二步把护栏的目标临时挪到"金丝雀"文件上再触发,
+    这样万一护栏失效, 被毁的是金丝雀而不是真实数据。
+    """
+    global _REAL_STATE
+    name = "P. 真实仓库写入护栏自检"
+    fingerprint_before = real_state_fingerprint()
+
+    # 第一步(真实绑定): 判据必须认得真实路径, 也必须放过临时路径
+    probe = os.path.join(_TMP_ROOT, "guard-probe.txt")
+    judge_ok = (_is_real_repo_data(_REAL_STATE)
+                and _is_real_repo_data(_REAL_STATE + ".tmp")
+                and _is_real_repo_data(os.path.join(REPO_ROOT, "output", "x.md"))
+                and not _is_real_repo_data(probe)
+                and not _is_real_repo_data(_TMP_ROOT))
+    check(f"{name} — 判据认得真实路径 / 放过临时路径", judge_ok)
+
+    # 第二步(金丝雀绑定): 四类写入都必须被拦下
+    canary = os.path.realpath(os.path.join(_TMP_ROOT, "canary-state.json"))
+    real_binding = _REAL_STATE
+    blocked = []
+    try:
+        _REAL_STATE = canary
+        for label, fn in (
+            ("open(w)", lambda: open(canary, "w").close()),
+            ("os.remove", lambda: os.remove(canary)),
+            ("os.replace", lambda: os.replace(probe, canary)),
+            ("os.rename", lambda: os.rename(probe, canary)),
+        ):
+            try:
+                fn()
+                blocked.append(f"{label}:未拦")
+            except RuntimeError:
+                blocked.append(f"{label}:拦下")
+            except Exception as e:
+                blocked.append(f"{label}:{type(e).__name__}")
+    finally:
+        _REAL_STATE = real_binding
+    check(f"{name} — 四类写入全部被拦下", all(b.endswith(":拦下") for b in blocked),
+          f"{blocked}")
+
+    # 第三步: 临时目录的正常写入不受影响(护栏不能误伤夹具)
+    ok = False
+    try:
+        write(probe, "ok")
+        with open(probe, encoding="utf-8") as f:
+            ok = f.read() == "ok"
+        os.remove(probe)
+    except Exception as e:
+        print(f"  (护栏误伤临时路径: {e})")
+    check(f"{name} — 临时目录写入不受影响", ok)
+
+    # 第四步: 走完这一圈, 真实 state.json 必须一个字节都没变
+    check(f"{name} — 真实 state.json 指纹未变",
+          real_state_fingerprint() == fingerprint_before,
+          f"{fingerprint_before} -> {real_state_fingerprint()}")
+
+
 def main() -> int:
     global _TMP_ROOT, _bare, _work, _commit_result
     _commit_result = {"success": True, "message": "ok"}
+
+    # 第一件事就是装上护栏: 任何场景(含将来新加的)想写真实 state.json / output/
+    # 都会当场抛异常。放在最前面, 免得后面哪个 import 或准备动作先动到手。
+    install_real_repo_write_guard()
+    state_fingerprint_before = real_state_fingerprint()
 
     print("=" * 72)
     print("回归测试：自动流程「提交 + 推送」不再静默假成功")
@@ -887,6 +1024,7 @@ def main() -> int:
         scenario_m()
         scenario_n()
         scenario_o()
+        scenario_p()
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -895,6 +1033,18 @@ def main() -> int:
         # 先还原全局，再删临时目录（顺序不能反：真实仓库的 PROJECT_ROOT 必须回来）
         lg.PROJECT_ROOT = old_root
         _force_rmtree(_TMP_ROOT)
+
+    # 结束不变量: 跑完整套之后, 真实仓库的 state.json 必须与开跑前**逐字节相同**。
+    # 这条和场景 P 分工不同 —— P 证明护栏本身有效, 这条证明所有场景都没触发过它。
+    # 本仓库两次数据事故(202251 字节 -> 2 字节)都是整套报 ALL PASS 时发生的:
+    # 绿的自检抓不到"测试把自己被测的数据改了", 只有这个跨全场的比对能抓到。
+    try:
+        after = real_state_fingerprint()
+        check("Q. 结束不变量: 真实 state.json 全程未被改动",
+              after == state_fingerprint_before,
+              f"{state_fingerprint_before} -> {after}")
+    except Exception as e:
+        check("Q. 结束不变量: 真实 state.json 全程未被改动", False, f"无法取证: {e}")
 
     print("=" * 72)
     n_fail = sum(1 for ok, _, _ in _RESULTS if not ok)
