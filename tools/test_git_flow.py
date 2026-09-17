@@ -21,8 +21,10 @@
 退出码：0 = ALL PASS；1 = 有 [FAIL]。
 """
 
+import io
 import json
 import os
+import pathlib
 import re
 import shutil
 import subprocess
@@ -874,11 +876,21 @@ def real_state_fingerprint() -> str:
 
 
 def install_real_repo_write_guard() -> None:
-    """把对真实仓库数据文件的写入/删除/覆盖变成异常, 而不是静默得逞."""
+    """把对真实仓库数据文件的写入/删除/覆盖变成异常, 而不是静默得逞.
+
+    `builtins.open` **不等于** `io.open`: pathlib 的 `Path.open`/`write_text`/
+    `write_bytes` 走的是 `io.open`, 只 patch builtins 会被它们整条绕过
+    (已实测)。`os.unlink` 同理 —— 它是 `os` 模块里**独立绑定**的一个名字,
+    不是 `os.remove` 的别名(`os.unlink is os.remove` 为 False), 只 patch remove
+    拦不住 unlink。两处都补上: 护栏的用途正是挡住"将来新加的场景", 而
+    `Path.write_text` 是最常见的写法, 留一个一行就能绕过的洞等于没装。
+    """
     import builtins
+    import io
 
     real_open, real_remove = builtins.open, os.remove
     real_replace, real_rename = os.replace, os.rename
+    real_unlink = os.unlink
 
     def guarded_open(file, mode="r", *a, **kw):
         if any(c in str(mode) for c in "wax+") and _is_real_repo_data(file):
@@ -889,6 +901,11 @@ def install_real_repo_write_guard() -> None:
         if _is_real_repo_data(path):
             raise RuntimeError(f"护栏拦下对真实仓库数据文件的删除: {path}")
         return real_remove(path, *a, **kw)
+
+    def guarded_unlink(path, *a, **kw):
+        if _is_real_repo_data(path):
+            raise RuntimeError(f"护栏拦下对真实仓库数据文件的删除: {path}")
+        return real_unlink(path, *a, **kw)
 
     def guarded_replace(src, dst, *a, **kw):
         if _is_real_repo_data(dst):
@@ -901,7 +918,9 @@ def install_real_repo_write_guard() -> None:
         return real_rename(src, dst, *a, **kw)
 
     builtins.open = guarded_open
+    io.open = guarded_open
     os.remove = guarded_remove
+    os.unlink = guarded_unlink
     os.replace = guarded_replace
     os.rename = guarded_rename
 
@@ -925,7 +944,8 @@ def scenario_p() -> None:
                 and not _is_real_repo_data(_TMP_ROOT))
     check(f"{name} — 判据认得真实路径 / 放过临时路径", judge_ok)
 
-    # 第二步(金丝雀绑定): 四类写入都必须被拦下
+    # 第二步(金丝雀绑定): 所有写入向量都必须被拦下, 包括 pathlib 与 os.unlink
+    # —— 这两个是只 patch builtins.open/os.remove 时的一行绕过口(已实测确认)。
     canary = os.path.realpath(os.path.join(_TMP_ROOT, "canary-state.json"))
     real_binding = _REAL_STATE
     blocked = []
@@ -933,7 +953,11 @@ def scenario_p() -> None:
         _REAL_STATE = canary
         for label, fn in (
             ("open(w)", lambda: open(canary, "w").close()),
+            ("io.open(w)", lambda: io.open(canary, "w").close()),
+            ("Path.write_text", lambda: pathlib.Path(canary).write_text("x", encoding="utf-8")),
+            ("Path.write_bytes", lambda: pathlib.Path(canary).write_bytes(b"x")),
             ("os.remove", lambda: os.remove(canary)),
+            ("os.unlink", lambda: os.unlink(canary)),
             ("os.replace", lambda: os.replace(probe, canary)),
             ("os.rename", lambda: os.rename(probe, canary)),
         ):
@@ -946,7 +970,7 @@ def scenario_p() -> None:
                 blocked.append(f"{label}:{type(e).__name__}")
     finally:
         _REAL_STATE = real_binding
-    check(f"{name} — 四类写入全部被拦下", all(b.endswith(":拦下") for b in blocked),
+    check(f"{name} — 八类写入向量全部被拦下", all(b.endswith(":拦下") for b in blocked),
           f"{blocked}")
 
     # 第三步: 临时目录的正常写入不受影响(护栏不能误伤夹具)
