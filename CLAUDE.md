@@ -67,8 +67,11 @@ python src/main.py
 # Simulate Actions environment
 CI=true python src/main.py
 
-# Git 提交/推送流程的回归测试（零网络、零鉴权，全部在 tempfile 建的裸库夹具里跑，
-# 不触碰真实 .git 与 origin）。改 tui/local_git.py 或 main.py 的收尾逻辑后必须跑。
+# Git 提交/推送流程的回归测试（零网络、零鉴权，全部在 tempfile 建的裸库夹具里跑）。
+# 改 tui/local_git.py 或 main.py 的收尾逻辑后必须跑。
+# 安全契约：main() 第一件事就装上写护栏（凡写真实 state.json / output/ 立即抛异常），
+# 末尾用场景 Q 断言真实 state.json 指纹全程未变。新增场景若忘了重定向 STATE_PATH，
+# 会当场变红而不是静默改数据 —— 这套件曾两次把真实 state.json 清成 `{}` 且报 ALL PASS。
 python tools/test_git_flow.py
 
 # Generate missing fakeid for WeChat sources (once, pre-seeded with a valid Cookie)
