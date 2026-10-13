@@ -277,15 +277,12 @@ def fetch_body_ua(url: str) -> dict:
     return {"content": body, "create_time": ct, "cover": cover_url}
 
 
-def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = None,
-                             since: datetime | None = None) -> tuple[list[dict], list[dict]]:
+def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = None) -> tuple[list[dict], list[dict]]:
     """主入口: 书架订阅号 → articles列表 → UA正文. 返回 (articles, inactive).
 
     复用真实 Edge(CDP)拿公众号列表; 正文用 UA 伪装(fetch_body_ua)。cookie 参数已不再需要
     (登录态在 Edge 会话里), 保留仅为兼容旧签名。
     seen_links: 已收录链接集合; 命中的文章不再调 fetch_body_ua 抓正文, 提前跳过(省请求/降风控)。
-    since: 日期闸门; 发布时间早于该时刻的文章直接跳过(不抓正文)。用于挡掉
-      列表接口反复返回的旧文 —— 它们可能从未进过 processed_links, 光看 URL 挡不住。
     articles: [{"title","url","publish_time","summary","source","createTime","image"}...]
     inactive: 1年未更新订阅号记录(仅用于日志, 无 fakeid 概念)
     """
@@ -327,18 +324,9 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
                              "last_update": latest_ct})
             logger.warning("订阅号[%s] 1年未更新(%s), 记失效", sub.get("name"), latest_ct)
         # 每篇文章 UA 抓正文
-        stale_skipped = 0
         for it in item_list:
             if seen_links and it.get("url") in seen_links:
                 logger.info("跳过已收录: %s", (it.get("t") or "")[:30])
-                continue
-            # 日期闸门: 列表接口固定返回该号"最近 N 篇", 更新少的号(如学报)会长期
-            # 返回同一批旧文。这些旧文若因某轮被跳过(引导/无新文章早退/抓取失败)而
-            # 从未进过报告, 就不在 processed_links 里 —— 只看 URL 的话**每一轮都会
-            # 重新 UA 抓一遍正文**(实测 21 篇旧文 × 3s, 白跑一分多钟还徒增风控)。
-            # 增量逻辑本来只关心新内容, 早于闸门的直接跳过。
-            if since and _is_before(it.get("date", ""), since):
-                stale_skipped += 1
                 continue
             art = {
                 "title": it.get("t", ""),
@@ -356,30 +344,8 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
                 if body_info.get("create_time"):
                     art["publish_time"] = art["publish_time"] or body_info["create_time"]
             articles.append(art)
-        if stale_skipped:
-            logger.info("订阅号[%s]: 跳过 %d 篇早于 %s 的旧文(未抓正文)",
-                        sub.get("name"), stale_skipped, since.strftime("%Y-%m-%d"))
     logger.info("订阅公众号抓取: %d 篇来自 %d 个订阅号", len(articles), len(subs))
     return articles, inactive
-
-
-def _is_before(date_str: str, cutoff: datetime) -> bool:
-    """date_str(YYYY-MM-DD)是否早于 cutoff. 空/解析失败返回 False(不拦, 防误杀).
-
-    与 _is_one_year_stale 同为"保守解析"风格: 拿不准就不拦 —— 漏抓一条新文章
-    比多抓一条旧文严重得多。
-    """
-    if not date_str:
-        return False
-    try:
-        m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", str(date_str))
-        if not m:
-            return False
-        d = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)),
-                     tzinfo=timezone(timedelta(hours=8)))
-        return d.date() < cutoff.date()
-    except Exception:
-        return False
 
 
 def _is_one_year_stale(date_str: str) -> bool:

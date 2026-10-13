@@ -167,33 +167,6 @@ def load_bootstrap_config() -> tuple[int, int]:
     return window_days, dormant_days
 
 
-# 公众号日期闸门的回退天数: 以 last_run 为基准再往前放宽, 容纳"发布延迟"。
-# 微信读书的列表接口固定返回该号最近 N 篇, 更新少的号(学报类)会长期返回同一批旧文;
-# 这些旧文若从未进过 processed_links(被引导/早退/失败跳过), 光靠 URL 去重挡不住,
-# 每轮都会重新 UA 抓正文。放宽 7 天是为了不误杀延迟发布的新文章。
-WECHAT_SINCE_LOOKBACK_DAYS = 7
-
-
-def _wechat_since(state: dict, now_dt: datetime) -> datetime:
-    """算出公众号抓取的日期闸门.
-
-    优先用 state["last_run"](上次抓取时刻)往前放宽 WECHAT_SINCE_LOOKBACK_DAYS;
-    last_run 缺失/无法解析时退回"今天往前 N 天"。回退而非收紧是刻意的:
-    漏掉一篇新文章比多抓几篇旧文严重得多。
-    """
-    floor = now_dt - timedelta(days=WECHAT_SINCE_LOOKBACK_DAYS)
-    last_run = state.get("last_run", "")
-    if not last_run:
-        return floor
-    try:
-        parsed = datetime.fromisoformat(last_run)
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=_BEIJING_TZ)
-        return max(parsed - timedelta(days=WECHAT_SINCE_LOOKBACK_DAYS), floor)
-    except Exception:
-        return floor
-
-
 def is_new_article(article: dict, state: dict) -> bool:
     """检查文章是否为新内容（增量过滤）."""
     link = article.get("link", "")
@@ -478,175 +451,6 @@ COMPREHENSIVE_EVAL_KEYWORDS: tuple[str, ...] = tuple(
 DEFAULT_EVAL_WINDOW_DAYS = 30
 
 
-# --- 可参与性判定 ---------------------------------------------------------
-# 综测文件的目的是"我下一步该报名/参加哪个活动", 而不是"今天有什么综测新闻"。
-# 只靠关键词命中会把大量**学生无法行动**的文章收进来(实测 36 条里约 5-6 条可行动):
-#   · 教师竞赛(参赛人是老师)      · 往届实践队风采展示(已结束)
-#   · 面向 2027 届的校招(与在读无关) · MBA/招生简章      · 已发表的成果报道
-# 因此先禁用词排除"明显不可参与"的, 再用 AI 判定剩余条目, AI 不可用时回退规则。
-
-# 排除词: 命中即判定为"学生不可参与"。宁可漏掉个别活动, 也不要把文件变成新闻流。
-EVAL_EXCLUDE_PATTERNS = (
-    # 参赛/参与主体不是学生
-    "教师", "教职工", "师资", "博士后", "辅导员招聘", "人才招聘", "诚聘", "招聘公告",
-    "教师教学", "教学案例竞赛", "教学竞赛", "教改", "教材",
-    # 已结束 / 结果类(无法再报名)
-    "风采", "回顾", "总结", "圆满", "落幕", "成功举办", "顺利召开", "顺利举行",
-    "获奖名单", "结果公示", "评选结果", "表彰决定", "名单公布", "已结束",
-    # 成果报道类
-    "发表", "登上", "成果", "突破", "团队在", "论文被", "影响因子", "引用",
-    # 招生/学籍类(在读本科生无法参与)。
-    # 注意不要放"校友""毕业"这类词: 校友主讲的观影/讲座学生照样能参加,
-    # "毕业"也会误伤面向毕业生的就业通知。只排除真正无法参与的招生动作。
-    "招生简章", "研究生招生", "博士招生", "MBA", "EMBA", "MPA",
-    "录取名单", "录取结果", "新生入学", "转专业结果", "毕业典礼",
-    # 行政/会议类
-    "工作推动会", "推动会", "座谈会", "党委", "中心组", "部署会", "推进会", "例会",
-)
-
-# 行动词: 标题含这些词说明"还能做点什么"(报名/参赛/申请/选课/投稿)。
-EVAL_ACTION_PATTERNS = (
-    "报名", "选课", "参赛", "参加", "申请", "申报", "投稿", "征集", "招募",
-    "纳新", "招新", "开始", "启动", "开放", "预告", "通知", "截止", "等你",
-    "大赛", "竞赛", "选拔", "招募令", "来袭", "邀请", "通道",
-)
-
-# 明确面向对象: 标题出现这些词更可能是面向在读学生
-EVAL_AUDIENCE_PATTERNS = ("本科生", "同学", "学生", "全体", "在校生", "级", "届")
-
-
-def _eval_rule_actionable(article: dict) -> bool:
-    """规则判定"是否为学生可报名/可参加的活动"(AI 不可用时的兜底).
-
-    判据: 标题命中行动词 且 不含排除词。
-    只排除、不用排除词白名单, 是因为"已结束"的表达方式太发散;
-    而漏掉一条活动的代价(少一个加分机会)远大于多看一条噪音。
-    """
-    title = article.get("title", "")
-    summary = article.get("summary", "")
-    haystack = f"{title} {summary}"
-    if any(pat in haystack for pat in EVAL_EXCLUDE_PATTERNS):
-        return False
-    if any(pat in title for pat in EVAL_ACTION_PATTERNS):
-        return True
-    # 标题无行动词, 但摘要里明确写了报名/截止等, 也算可参与
-    return any(pat in summary for pat in ("报名", "截止", "申请", "选课"))
-
-
-def _ai_judge_actionable(articles: list[dict]) -> dict[int, bool] | None:
-    """用 LLM 判定每条是否为"学生可报名/可参加的活动".
-
-    Returns:
-        {index: True/False}; 调用或解析失败返回 None(调用方回退规则式)。
-    """
-    if not articles:
-        return {}
-    lines = []
-    for i, a in enumerate(articles):
-        hint = (a.get("summary") or a.get("content") or "").strip()[:200]
-        lines.append(
-            f"[{i}] 来源:{a.get('source','')} | 标题:{a.get('title','')}"
-            + (f" | 内容:{hint}" if hint else "")
-        )
-    prompt = (
-        "以下是天津大学的校园资讯。用户是【在读本科生】, 想把它们用于综合素质测评"
-        "(综测)加分, 需要的是【本人现在还能报名 / 还能参加】的活动。\n"
-        "请逐条判断 actionable: 该本科生此刻是否还能报名或参加?\n"
-        "判 true 的例子: 活动预告、报名通知、选课通知、竞赛报名、讲座预告、招募成员、"
-        "征集作品、比赛报名中。\n"
-        "判 false 的例子: 活动已经办完(回顾/风采/圆满落幕)、获奖结果公示、科研成果报道、"
-        "面向教师/教职工的活动、面向研究生或已毕业生的招聘、招生简章、行政会议新闻。\n"
-        "拿不准时判 false(宁缺毋滥)。\n"
-        "只返回严格 JSON: {\"items\":[{\"index\":n,\"actionable\":true|false}]}\n\n"
-        + "\n".join(lines)
-    )
-    try:
-        client = FaultTolerantClient()
-        resp = client.call(
-            prompt=prompt,
-            system_prompt="你是面向天津大学本科生的活动筛选助手。输出必须为合法 JSON, 不得有多余文字。",
-            temperature=0,
-            max_tokens=1500,
-        )
-        content = resp.choices[0].message.content or ""
-        try:
-            data = json.loads(content)
-        except Exception:
-            from json_repair import repair_json
-            data = json.loads(repair_json(content))
-        verdict: dict[int, bool] = {}
-        for it in data.get("items", []):
-            idx = it.get("index")
-            if isinstance(idx, int) and 0 <= idx < len(articles):
-                verdict[idx] = bool(it.get("actionable"))
-        if not verdict:
-            logger.warning("综测 AI 判定返回空, 回退规则式")
-            return None
-        logger.info("综测 AI 判定完成: %d/%d 条可参与",
-                    sum(1 for v in verdict.values() if v), len(articles))
-        return verdict
-    except Exception as e:
-        logger.warning("综测 AI 判定失败, 回退规则式: %s", e)
-        return None
-
-
-def _filter_actionable(articles: list[dict]) -> tuple[list[dict], int]:
-    """从候选文章中筛出"学生可报名/可参加"的, 返回 (保留列表, 被排除数).
-
-    两步: 先用排除词砍掉明显不可参与的(省 token), 再对剩余条目做 AI 判定;
-    AI 不可用时整批回退规则式 —— 不会退化成"全收录"。
-    """
-    kept = [a for a in articles if not any(
-        pat in f"{a.get('title','')} {a.get('summary','')}" for pat in EVAL_EXCLUDE_PATTERNS)]
-    pre_excluded = len(articles) - len(kept)
-
-    verdict = _ai_judge_actionable(kept)
-    if verdict is None:
-        finals = [a for a in kept if _eval_rule_actionable(a)]
-    else:
-        finals = [a for i, a in enumerate(kept) if verdict.get(i, False)]
-    return finals, pre_excluded + (len(kept) - len(finals))
-
-
-# 判为"同一活动"的标题相似度阈值。中文标题转发时用词高度重叠(多/少"活动预告"
-# "等你来"等前后缀), 字符集合 Jaccard 在 0.75 能稳定合并, 又不至于把
-# "数学建模竞赛报名"和"电子设计竞赛报名"这类真不同的活动误并。
-TITLE_SIMILARITY_THRESHOLD = 0.75
-
-
-def _title_fingerprint(title: str) -> str:
-    """标题指纹: 去空白与标点后小写, 作为相似度比较的字符集."""
-    return re.sub(r"[\s\|｜·、,，。.。:：!！?？\-—－()（）《》\[\]【】]+", "", title).lower()
-
-
-def _title_similar(a: str, b: str) -> bool:
-    """两标题是否描述同一活动(字符集合 Jaccard >= 阈值)."""
-    sa, sb = set(a), set(b)
-    if not sa or not sb:
-        return False
-    return len(sa & sb) / len(sa | sb) >= TITLE_SIMILARITY_THRESHOLD
-
-
-def _dedupe_by_title(articles: list[dict]) -> list[dict]:
-    """合并同一活动被多个公众号转发的条目, 保留首次出现的(主办方通常在前).
-
-    实测《大理寺日志3》观影交流会被 3 个号分别推送, 标题互有增减; 仅靠精确指纹
-    只能合并其中两条, 用相似度才能全并 —— 否则一件事占满整个文件。
-    """
-    kept: list[dict] = []
-    seen_fps: list[str] = []
-    for a in articles:
-        fp = _title_fingerprint(a.get("title", ""))
-        if not fp:
-            kept.append(a)
-            continue
-        if any(_title_similar(fp, prev) for prev in seen_fps):
-            continue
-        seen_fps.append(fp)
-        kept.append(a)
-    return kept
-
-
 def _eval_keyword_hits(article: dict, keywords) -> list[str]:
     """返回该文章命中的综测关键词(去重保序); 未命中返回空列表."""
     text = f"{article.get('title', '')} {article.get('summary', '')} " \
@@ -680,12 +484,10 @@ def generate_eval_report(
     profile: dict,
     window_days: int = DEFAULT_EVAL_WINDOW_DAYS,
 ) -> str:
-    """生成"综测可参与活动"简报 —— 独立于日报, 只收录命中综测关键词**且仍可报名参加**的文章.
+    """生成"综测相关文章"简报 —— 独立于日报, 只收录命中综测关键词的文章.
 
     与主日报的区别:
     - 不分组 Part1/2/3, 而是**按综测五大模块(德智体美劳)归类**, 便于逐项对照加分表
-    - 只保留"学生此刻还能报名/参加"的活动(见 _filter_actionable), 已结束/面向教师/
-      成果报道类一律不收 —— 否则文件会变成新闻流, 失去"下一步做什么"的价值
     - 每篇标注命中的关键词, 方便判断该找学工办要哪类证明
     - 只收录窗口期内的文章, 因为综测加分有学年时限
 
@@ -700,11 +502,12 @@ def generate_eval_report(
     now_dt = beijing_now()
     cutoff = now_dt - timedelta(days=window_days)
 
-    # 三关漏斗: 关键词命中 → 窗口内 → 学生可报名/可参加。
-    # 最后一关是关键: 只靠关键词会把"往届实践队风采""教师竞赛""2027届校招"
-    # 这类无法行动的内容收进来, 文件就退化成新闻流, 失去"下一步做什么"的价值。
-    keyword_hits: list[tuple[dict, list[str]]] = []
+    # 归类走单一事实源 EVAL_KEYWORDS_BY_MODULE(见文件头注释): 命中 → 首个匹配的模块
+    buckets: dict[str, list[tuple[dict, list[str]]]] = {
+        m: [] for m, _ in EVAL_KEYWORDS_BY_MODULE
+    }
     skipped_old = 0
+
     for a in articles:
         hits = _eval_keyword_hits(a, COMPREHENSIVE_EVAL_KEYWORDS)
         if not hits:
@@ -715,21 +518,6 @@ def generate_eval_report(
         if ts is not None and ts < cutoff:
             skipped_old += 1
             continue
-        keyword_hits.append((a, hits))
-
-    # 同一活动常被多个公众号转发, 先去重再判定, 免得既浪费 AI token 又让文件被同一件事占满
-    deduped = _dedupe_by_title([a for a, _ in keyword_hits])
-    dup_count = len(keyword_hits) - len(deduped)
-    kept, skipped_no_action = _filter_actionable(deduped)
-
-    # 归类走单一事实源 EVAL_KEYWORDS_BY_MODULE(见文件头注释): 命中 → 首个匹配的模块
-    buckets: dict[str, list[tuple[dict, list[str]]]] = {
-        m: [] for m, _ in EVAL_KEYWORDS_BY_MODULE
-    }
-    kept_links = {id(a) for a in kept}
-    for a, hits in keyword_hits:
-        if id(a) not in kept_links:
-            continue
         for module, kws in EVAL_KEYWORDS_BY_MODULE:
             if any(k in hits for k in kws):
                 buckets[module].append((a, hits))
@@ -739,34 +527,20 @@ def generate_eval_report(
 
     total = sum(len(v) for v in buckets.values())
     lines = [
-        "# 天津大学综测 · 可参与活动简报",
+        "# 天津大学综测相关文章简报",
         "",
         f"**生成时间**: {now_dt.strftime('%Y-%m-%d %H:%M:%S')}",
         f"**用户画像**: {profile.get('degree', '未知')} | {profile.get('college', '未知')} | {profile.get('major', '未知')}",
+        f"**收录范围**: 本轮新增文章中命中综测关键词者, 共 {total} 条"
+        + (f"（{skipped_old} 条因超出近 {window_days} 天未收录）" if skipped_old else ""),
         "",
-        f"**筛选漏斗**: 本轮新增 {len(articles)} 篇 → 命中综测关键词 {len(keyword_hits)} 篇"
-        + (f" → 近 {window_days} 天内 {len(deduped)} 篇" if skipped_old else "")
-        + f" → **可报名/可参加 {total} 篇**",
-        "",
-    ]
-    if skipped_old or dup_count or skipped_no_action:
-        notes = []
-        if skipped_old:
-            notes.append(f"超出近 {window_days} 天 {skipped_old} 篇")
-        if dup_count:
-            notes.append(f"同一活动多号转发 {dup_count} 篇")
-        if skipped_no_action:
-            notes.append(f"已结束或学生无法参与 {skipped_no_action} 篇")
-        lines.append(f"> 另有 {'、'.join(notes)}，未收录。")
-        lines.append("")
-    lines.extend([
-        "> 本文件**只收录你现在还能报名/参加的活动**, 已结束的、面向教师的、成果报道类均不收录。",
+        "> 本文件按综测五大模块归类, 仅供**对照加分项、准备支撑材料**使用。",
         "> 加分项与证明材料要求见学部《本科生综合素质测评考核指标》与《考核涉及活动说明参考》。",
-        "> 注意: 综测加分只认「上一学年开学后至下一学年开学前」内发生的活动, 且需有证明材料 —— 参加后记得留证。",
+        "> 注意: 综测加分只认「上一学年开学后至下一学年开学前」内发生的活动, 且需有证明材料。",
         "",
         "---",
         "",
-    ])
+    ]
 
     module_titles = {
         "德": "德 · 思政教育 / 入党入团 / 学生工作 / 献血",
@@ -814,8 +588,8 @@ def write_eval_report(
     output_dir = os.path.join(PROJECT_ROOT, "..", "output", COMPREHENSIVE_EVAL_DIR)
     report = generate_eval_report(articles, profile, window_days)
     # 无相关文章时不落盘空文件: 否则每天多一个只有抬头的文件, 徒增噪音
-    if "**可报名/可参加 0 篇**" in report:
-        logger.info("综测简报: 本轮无可报名/可参加的活动, 不生成文件")
+    if "本轮无综测相关文章。" in report:
+        logger.info("综测简报: 本轮无相关文章, 不生成文件")
         return None
     os.makedirs(output_dir, exist_ok=True)
     filename = f"{beijing_now().strftime('%Y-%m-%d_%H-%M-%S')}.md"
@@ -1078,8 +852,7 @@ def main() -> int:
     gzh_sources = [x for x in sources if x.get("type") == "wechat_rss"]
     if gzh_sources:
         # 本地/本地仿真可传 account_names；默认从 sources.yaml 读公众号名
-        wechat_articles, inactive_gzh = fetch_wechat_articles(
-            seen_links=seen_links, since=_wechat_since(state, now_dt))
+        wechat_articles, inactive_gzh = fetch_wechat_articles(seen_links=seen_links)
         all_articles.extend(wechat_articles)
         fetch_summary["wechat_total"] = len(wechat_articles)
         # 处理失效公众号: 记录到 deprecated_accounts.yaml + 从 sources.yaml 真删
