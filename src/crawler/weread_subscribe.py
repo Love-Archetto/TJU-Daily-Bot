@@ -144,62 +144,23 @@ def list_subscribed(cookie: str) -> list[dict]:
     return subs
 
 
-# mp.weixin 短链 token 的最大长度。正常 token 是 22 字符 base64url
-# (如 J8e2EB9pn8aN7L~F8a5fKA)。留到 32 是为容忍将来的小幅变化。
-# 超过该长度的一律视为"不可用 id": 2026-10 起 /web/mp/articles 的
-# mpInfo.originalId 变成了 75 字符加密串(27 字符账号前缀 + 48 字符密文),
-# 拼出的链接必报「参数错误」—— 实测 54 个滑动窗口切片、base64 各种变体、
-# md5/sha 变换、/web/mp/content 与十余个候选接口, 全部无法还原出短 token。
-_TOKEN_MAX_LEN = 32
-
-
-def _cover_token_js(book_id: str) -> str:
-    """生成"取封面接口短 token"的 JS 片段(由调用方拼进 Promise.all)。
-
-    /api/mp/cover 是**唯一**仍返回 mp.weixin 短链 token 的接口:
-    reviewId 形如 MP_WXS_<bookId>_<token>, 取末段并把 ~ 还原成 _ 即为可用短链
-    (本项目既有约定, 源自 weread-mp-fetcher 的"原文链接里的 ~ 还原成 _"修复)。
-    代价: 它只返回该号**最新一篇**。
-    """
-    cover_url = f"/api/mp/cover?bookId={book_id}"
-    cover_safe = cover_url.replace("\\", "\\\\").replace("'", "\\'")
-    return ("fetch('" + cover_safe + "',{credentials:'include'})"
-            ".then(r=>r.json()).catch(()=>({}))")
-
-
 def fetch_articles(cookie: str, book_id: str, reader_url: str = "",
                    offset: int = 0) -> list[dict]:
-    """/web/mp/articles 拿某订阅号文章列表, 并解析出可用的 mp.weixin 短链.
+    """/web/mp/articles 拿某订阅号文章列表.
 
     reader_url: 阅读器页 (https://weread.qq.com/web/mp/reader/<hash>)。**必须**在该页
     上下文里发 articles 请求, 首页发返回 -2041。缺省退回首字母书页(=原首页路径)。
     offset 是"已跳过的群发条数"(非文章篇数)。返回 [{"title","url","createTime"}...]。
-
-    短链来源(按优先级):
-      1. mpInfo.originalId 若仍是短 token(长度 <= _TOKEN_MAX_LEN) —— 老格式, 全量可用;
-      2. 兜底用 /api/mp/cover 的 reviewId 末段 —— **只覆盖该号最新一篇**。
-    两条都拿不到的条目会被丢弃(url 为空), 因为拼不出可打开的链接:
-    宁可不收录, 也不要在报告里写死链 —— 死链会让增量去重彻底失效, 导致每轮重复抓取。
     """
     url = f"/web/mp/articles?bookId={book_id}&offset={offset}"
     js_safe = url.replace("\\", "\\\\").replace("'", "\\'")
-    js = ("(()=>Promise.all([" + _cover_token_js(book_id) + ","
-          "fetch('" + js_safe + "',{credentials:'include'}).then(r=>r.json())"
-          "]).then(a=>{var cover=a[0]||{},o=a[1]||{};"
-          "var cvToken=String(cover.reviewId||'').split('_').pop().replace(/~/g,'_');"
-          "var cvTitle=String(cover.title||'').trim();"
-          "var items=(o.reviews||[]).map(g=>(g.subReviews||[]).map(s=>{"
-          "var mi=(s.review&&s.review.mpInfo)||{};var oid=String(mi.originalId||'');"
-          "var tok=(oid&&oid.length<=" + str(_TOKEN_MAX_LEN) + ")?oid.replace(/~/g,'_'):'';"
-          "return {t:mi.title,oid:oid,tok:tok,"
-          "ct:s.review?Number(s.review.createTime||0):0};"
-          "})).flat();"
-          "items.forEach(function(x,i){"
-          "var t=String(x.t||'').trim();"
-          "if(!x.tok&&cvToken&&(t===cvTitle||i===0)){x.tok=cvToken;}});"
-          "return JSON.stringify({errCode:o.errCode,items:items,"
-          "n:(o.reviews||[]).length,coverToken:cvToken})"
-          "}).catch(e=>JSON.stringify({err:String(e)})))()")
+    js = ("(()=>fetch('" + js_safe + "',{credentials:'include'})"
+          ".then(r=>r.json()).then(o=>JSON.stringify({errCode:o.errCode,"
+          "items:(o.reviews||[]).map(g=>(g.subReviews||[]).map(s=>{var mi=(s.review&&s.review.mpInfo)||{};"
+          "return {t:mi.title,url:mi.originalId?('https://mp.weixin.qq.com/s/'+mi.originalId.replace(/~/g,'_')):null,"
+          "ct:s.review?Number(s.review.createTime||0):0,rid:(s.review&&s.review.reviewId)||''}})).flat(),"
+          "n:(o.reviews||[]).length}))"
+          ".catch(e=>JSON.stringify({err:String(e)})))()")
     page_url = reader_url or "https://weread.qq.com/"
     d = _run_page_js(cookie, js, "articles", page_url)
     if d.get("errCode"):
@@ -219,23 +180,7 @@ def fetch_articles(cookie: str, book_id: str, reader_url: str = "",
         else:
             logger.warning("articles errCode=%s bookId=%s", err, book_id)
             return []
-    # 只有拿到短 token 的条目才拼链接: 缺 token 的直接丢弃, 绝不写死链。
-    # 死链的代价是增量去重失效(processed_links 里存的是短链), 会退回"每轮重抓全部"。
-    raw_items = d.get("items", []) or []
-    items, unresolved = [], 0
-    for it in raw_items:
-        tok = (it.get("tok") or "").strip()
-        if not tok:
-            unresolved += 1
-            continue
-        it["url"] = "https://mp.weixin.qq.com/s/" + tok
-        items.append(it)
-    if unresolved:
-        # 可恢复: 等微信读书把 mpInfo.originalId 改回短 token, 覆盖度会自动恢复
-        logger.warning(
-            "%s: %d 篇拿不到可用短链已跳过(originalId 为加密长串, 且非该号最新一篇)",
-            book_id, unresolved,
-        )
+    items = [it for it in d.get("items", []) if it.get("url")]
     # createTime 时间戳 → 北京日期
     for it in items:
         if it.get("ct"):
