@@ -167,6 +167,33 @@ def load_bootstrap_config() -> tuple[int, int]:
     return window_days, dormant_days
 
 
+# 公众号日期闸门的回退天数: 以 last_run 为基准再往前放宽, 容纳"发布延迟"。
+# 微信读书的列表接口固定返回该号最近 N 篇, 更新少的号(学报类)会长期返回同一批旧文;
+# 这些旧文若从未进过 processed_links(被引导/早退/失败跳过), 光靠 URL 去重挡不住,
+# 每轮都会重新 UA 抓正文。放宽 7 天是为了不误杀延迟发布的新文章。
+WECHAT_SINCE_LOOKBACK_DAYS = 7
+
+
+def _wechat_since(state: dict, now_dt: datetime) -> datetime:
+    """算出公众号抓取的日期闸门.
+
+    优先用 state["last_run"](上次抓取时刻)往前放宽 WECHAT_SINCE_LOOKBACK_DAYS;
+    last_run 缺失/无法解析时退回"今天往前 N 天"。回退而非收紧是刻意的:
+    漏掉一篇新文章比多抓几篇旧文严重得多。
+    """
+    floor = now_dt - timedelta(days=WECHAT_SINCE_LOOKBACK_DAYS)
+    last_run = state.get("last_run", "")
+    if not last_run:
+        return floor
+    try:
+        parsed = datetime.fromisoformat(last_run)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=_BEIJING_TZ)
+        return max(parsed - timedelta(days=WECHAT_SINCE_LOOKBACK_DAYS), floor)
+    except Exception:
+        return floor
+
+
 def is_new_article(article: dict, state: dict) -> bool:
     """检查文章是否为新内容（增量过滤）."""
     link = article.get("link", "")
@@ -1051,7 +1078,8 @@ def main() -> int:
     gzh_sources = [x for x in sources if x.get("type") == "wechat_rss"]
     if gzh_sources:
         # 本地/本地仿真可传 account_names；默认从 sources.yaml 读公众号名
-        wechat_articles, inactive_gzh = fetch_wechat_articles(seen_links=seen_links)
+        wechat_articles, inactive_gzh = fetch_wechat_articles(
+            seen_links=seen_links, since=_wechat_since(state, now_dt))
         all_articles.extend(wechat_articles)
         fetch_summary["wechat_total"] = len(wechat_articles)
         # 处理失效公众号: 记录到 deprecated_accounts.yaml + 从 sources.yaml 真删
