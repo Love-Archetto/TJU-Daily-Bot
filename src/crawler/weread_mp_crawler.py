@@ -1,14 +1,11 @@
 """微信公众号抓取 — 微信读书方案(weread.qq.com).
 
-原理(源码 we-mp-rss issue #442 + weread_mp 实证):
-  - 公众号 bookId = "MP_WXS_" + base64解码(fakeid)
-  - 用微信读书 wr_* cookie 调 weread.qq.com/api/mp/cover?bookId= 拿最新一篇(reviewId)
-  - reviewId 可拼 mp.weixin.qq.com 原文直链
-限制(源码实证): 每号只最新 1 篇(cover 增量)。稳定、无频控(appmsg 的 200013)。
+现用链路(见 weread_subscribe): 复用已登录的真实 Edge(CDP) → /web/shelf/sync 发现已订阅号
+→ /web/mp/articles 列文章 → 逐篇 /web/mp/content 取规范原文链接 + 正文 + 时间 + 封面。
+全程在 weread 会话内, 不碰 mp.weixin(那条路已被风控封死: UA 伪装/无头客户端一律被拦)。
 
-依赖:
-  - 微信读书 wr_* cookie: 从 weread.json(扫码产生)或 WEREAD_COOKIE env
-  - sources.yaml 里公众号 fakeid(已全部生成)→ bookId
+下方 fetch_latest_article / fakeid_to_bookid / WEREAD_API 是**已废弃的旧 cover 方案**
+(/api/mp/cover, 每号只最新 1 篇), 保留仅供查阅, 无人调用。get_weread_cookie 仍被 main.py 使用。
 """
 
 import base64
@@ -181,18 +178,19 @@ def _maybe_alert_cookie_expired(book_id: str, status: int, detail: str) -> None:
 
 def fetch_wechat_articles(account_names: list[str] | None = None,
                           seen_links: set[str] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """抓取公众号 — 复用真实 Edge(CDP) + /web/mp/articles + UA 伪装正文.
+    """抓取公众号 — 复用真实 Edge(CDP) + /web/mp/articles + /web/mp/content.
 
     取代旧 cover(/api/mp/cover)方案与 headless+cookie 方案。仅追踪微信读书里"已订阅"的公众号。
+    正文/链接/时间/封面都在 weread_subscribe 里由 /web/mp/content 一并取回(不碰 mp.weixin)。
     保持返回 (articles, inactive) 契约, 使 main.py 调用点(含 _prune_inactive_gzh)不变。
 
     Args:
         account_names: 保留兼容, 未使用。
-        seen_links: 已收录链接集合; 命中的文章不再抓正文(fetch_body_ua), 提前跳过。
+        seen_links: 已收录链接集合; 命中的文章不再产出(链接须抓完 content 才知道, 故请求仍会发出)。
 
     Returns:
         (articles, inactive)
-        articles: [{"title","link","publish_time","source","content","summary"}...]
+        articles: [{"title","link","publish_time","source","content","summary","image"}...]
         inactive: [{"name","bookId","last_update"}] 1年未更新订阅号(仅记录)
     """
     from .weread_subscribe import fetch_subscribed_articles

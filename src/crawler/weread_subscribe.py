@@ -1,22 +1,32 @@
-"""微信读书新接口公众号抓取 — 复用真实 Edge(CDP) + /web/mp/articles + UA 伪装正文.
+"""微信读书新接口公众号抓取 — 复用真实 Edge(CDP) + /web/mp/articles + /web/mp/content.
 
 取代"自开 headless + 注入 cookie"(那会触发腾讯防水墙验证码, articles 返回 -2041)。
 三条能力:
   1. /web/shelf/sync 书架接口 → 动态发现"已订阅"的公众号(MP_WXS_开头), 每个号带 readerUrl
-  2. /web/mp/articles?bookId=&offset= → 拿该号文章列表(多篇), 含 mp.weixin 原文直链
-  3. UA 伪装(MicroMessenger UA + requests) → 抓 mp.weixin 正文(绕滑块, 替代 Playwright 渲染)
-关键上下文(对齐 Pengyf04/weread-mp-fetcher): /web/mp/articles 必须在**阅读器页**
+  2. /web/mp/articles?bookId=&offset= → 拿该号文章列表(多篇), 每篇带加密 reviewId
+  3. /web/mp/content?reviewId= → 拿**单篇完整正文页 HTML**, 从中解析
+        og:url      → 规范原文链接(全格式: __biz/mid/idx/sn/chksm)
+        og:title    → 标题
+        og:image    → 封面图
+        createTime  → 发布时间
+        #js_content → 正文纯文本
+关键上下文(对齐 Pengyf04/weread-mp-fetcher): 上述请求必须在**阅读器页**
   /web/mp/reader/<hash> 的页面上下文里 fetch(首页发返回 -2041; 无头自开会弹验证码)。
   readerUrl 由书架 deepLink 的校验 hash `v` 拼出(不可自拼)。执行上下文来自登录过的真实 Edge
   (见 weread_cdp), 不新开浏览器。
 
+为什么不再用 UA 伪装抓 mp.weixin 正文: /web/mp/articles 的 mpInfo.originalId 已变成 75 字符
+加密串(既拼不出 /s/<短码>, 也无法解密回原链接)。唯一能拿到原链接的途径是 /web/mp/content,
+而它连同正文/时间/封面一起给出 —— 于是整条链路都留在 weread 会话内, 完全不触碰 mp.weixin,
+反爬/UA 伪装/验证码问题一并消失(旧的 fetch_body_ua 已删除)。
+
 依赖: playwright(项目已装) / MS Edge。不再需要 WEREAD_COOKIE(登录态在 Edge 会话里)。
-默认间隔: 所有请求(书架/articles/UA正文)之间 3s±1s(原 180±60s 过慢; 本地人工运行靠
-  下方反爬闸门兜底)。触发反爬(articles -2041 防水墙 / mp.weixin UA 正文风控)时打印提示,
-  等待用户在 Edge/网页里刷新并完成验证后回终端按回车继续; 非交互环境(CI/管道)退避 180s。
+默认间隔: 所有请求之间 3s±1s。触发反爬(articles -2041 防水墙)时打印提示, 等待用户在
+  Edge 里刷新并完成验证后回终端按回车继续; 非交互环境(CI/管道)退避 180s。
 """
 
 import html
+import json
 import logging
 import os
 import random
@@ -27,20 +37,43 @@ from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 
-# 请求间隔(秒): 3s ± 1s(原 180±60s 过慢; 间隔短时靠下方反爬闸门人工兜底)
-REQUEST_INTERVAL_MEAN = 3.0
-REQUEST_INTERVAL_SPREAD = 1.0
+# 请求间隔(秒): 3s ± 1s(原 180±60s 过慢; 间隔短时靠下方反爬闸门人工兜底)。
+# 回填(一次性重抓全部在列文章, 上千次请求)可用 WEREAD_INTERVAL/WEREAD_INTERVAL_SPREAD 调快。
+REQUEST_INTERVAL_MEAN = float(os.environ.get("WEREAD_INTERVAL", "3.0") or 3.0)
+REQUEST_INTERVAL_SPREAD = float(os.environ.get("WEREAD_INTERVAL_SPREAD", "1.0") or 1.0)
 
 # 非交互环境(CI/管道, stdin 非终端)触发反爬后的退避秒数(无真人可刷新, 慢速重试更安全)
 NON_INTERACTIVE_BACKOFF = 180.0
 
-# mp.weixin UA 正文响应的风控/验证页特征(命中视为反爬, 需在真实 Edge 里打开该链接过验证)
-ANTIBOT_MARKERS = ("环境异常", "访问过于频繁", "请完成验证", "完成验证", "去验证", "请输入验证码")
+# 单篇正文页 HTML 很大(~3.5MB, 主要是页面自带的 JS/CSS), 解析后只回传这些小字段;
+# 正文只取前 N 字符(供 LLM 摘要足够, 无需整篇)。
+CONTENT_CHARS = 4000
 
-# UA 伪装(weflow-cli 实测有效): 微信内置浏览器
-WECHAT_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
-             "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "
-             "MicroMessenger/8.0.34(0x16082222) NetType/WIFI Language/zh_CN")
+# 每号最多处理多少篇列表文章(0 = 不限制)。仅用于回填/调试时缩小范围。
+MAX_ITEMS_PER_SOURCE = int(os.environ.get("WEREAD_MAX_ITEMS_PER_SOURCE", "0") or 0)
+# 最多处理多少个订阅号(0 = 不限制)
+MAX_ACCOUNTS = int(os.environ.get("WEREAD_MAX_ACCOUNTS", "0") or 0)
+
+
+def _env_float(name: str, default: float) -> float:
+    """读浮点环境变量; 缺省/空/坏值都用 default(注意 '0' 是合法值, 不能掉进 or 分支)."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("环境变量 %s=%r 不是数字, 用默认 %s", name, raw, default)
+        return default
+
+
+# 只对"最近 N 天"发表的列表文章去抓正文(0 = 不限制, 回填时用)。
+# 必要性: /web/mp/articles 的 originalId 已加密, 原文链接只有抓完 /web/mp/content 才知道,
+# 于是无法像旧代码那样在抓正文前用链接过滤已收录文章 —— 不做窗口限制的话, 每天都会把
+# 92 个号 × 约 20 篇(每篇 ~3.5MB 正文页)全部重抓一遍。列表页本身带 createTime,
+# 用它做闸门即可把每日请求压到接近"真正的新文章"数量级。
+# 与 config/bootstrap.yaml 的 window_days 取同一个"近 N 天"尺度(那边是 3)。
+LOOKBACK_DAYS = _env_float("WECHAT_LOOKBACK_DAYS", 3.0)
 
 CYAN = "\033[36m"
 EOM = "\033[0m"
@@ -78,19 +111,6 @@ def _antibot_wait(tag: str, hint: str) -> None:
     time.sleep(NON_INTERACTIVE_BACKOFF)
 
 
-def _antibot_reason(final_url: str, status: int, html: str) -> str:
-    """判 mp.weixin UA 正文响应是否风控/验证页; 正常/空正文/文章被删等返回空串(不算反爬)."""
-    if "mp/verifypage" in final_url or "/verify" in final_url:
-        return "被重定向到验证页(mp/verifypage)"
-    if status == 403:
-        return "HTTP 403"
-    s = html or ""
-    for m in ANTIBOT_MARKERS:
-        if m in s:
-            return f"页面含风控标记「{m}」"
-    return ""
-
-
 def _get_cookie() -> str:
     """取微信读书 cookie(env/.env WEREAD_COOKIE)."""
     c = os.environ.get("WEREAD_COOKIE", "").strip()
@@ -105,13 +125,12 @@ def _get_cookie() -> str:
 
 
 def _run_page_js(cookie: str, js: str, tag: str, page_url: str = "https://weread.qq.com/") -> dict:
-    """在 weread 页面上下文执行 JS(书架/articles).
+    """在 weread 页面上下文执行 JS(书架/articles/content).
 
     复用已登录、已过验证码的真实 Edge(见 weread_cdp): 不新开浏览器, connect_over_cdp 到
     调试端口上的 Edge。阅读器页 URL 走 `/web/mp/reader/<hash>` 上下文(否则 articles 返回 -2041),
     其余(书架)用 edge 里任一 weread 页上下文。cookie 参数在 CDP 模式下不再需要(登录态在 Edge 会话里)。
     """
-    import json
     from . import weread_cdp
 
     try:
@@ -150,15 +169,19 @@ def fetch_articles(cookie: str, book_id: str, reader_url: str = "",
 
     reader_url: 阅读器页 (https://weread.qq.com/web/mp/reader/<hash>)。**必须**在该页
     上下文里发 articles 请求, 首页发返回 -2041。缺省退回首字母书页(=原首页路径)。
-    offset 是"已跳过的群发条数"(非文章篇数)。返回 [{"title","url","createTime"}...]。
+    offset 是"已跳过的群发条数"(非文章篇数)。
+
+    返回 [{"t":标题,"rid":reviewId,"ct":发布ts,"date":北京日期}...]。
+    注意: mpInfo.originalId 已是加密长串, 拼不出原文链接 —— 链接必须再调
+    fetch_article_content(rid) 从正文页 og:url 取。
     """
     url = f"/web/mp/articles?bookId={book_id}&offset={offset}"
     js_safe = url.replace("\\", "\\\\").replace("'", "\\'")
     js = ("(()=>fetch('" + js_safe + "',{credentials:'include'})"
           ".then(r=>r.json()).then(o=>JSON.stringify({errCode:o.errCode,"
           "items:(o.reviews||[]).map(g=>(g.subReviews||[]).map(s=>{var mi=(s.review&&s.review.mpInfo)||{};"
-          "return {t:mi.title,url:mi.originalId?('https://mp.weixin.qq.com/s/'+mi.originalId.replace(/~/g,'_')):null,"
-          "ct:s.review?Number(s.review.createTime||0):0,rid:(s.review&&s.review.reviewId)||''}})).flat(),"
+          "return {t:mi.title,rid:(s.review&&s.review.reviewId)||'',"
+          "ct:s.review?Number(s.review.createTime||0):0}})).flat(),"
           "n:(o.reviews||[]).length}))"
           ".catch(e=>JSON.stringify({err:String(e)})))()")
     page_url = reader_url or "https://weread.qq.com/"
@@ -180,7 +203,7 @@ def fetch_articles(cookie: str, book_id: str, reader_url: str = "",
         else:
             logger.warning("articles errCode=%s bookId=%s", err, book_id)
             return []
-    items = [it for it in d.get("items", []) if it.get("url")]
+    items = [it for it in d.get("items", []) if it.get("rid")]
     # createTime 时间戳 → 北京日期
     for it in items:
         if it.get("ct"):
@@ -194,96 +217,81 @@ def fetch_articles(cookie: str, book_id: str, reader_url: str = "",
     return items
 
 
-def _extract_cover(page_html: str) -> str:
-    """从 mp.weixin 正文页 HTML 提取封面图 URL(msg_cdn_url → cover → og:image 回退)."""
-    if not page_html:
-        return ""
-    patterns = [
-        r"msg_cdn_url\s*=\s*['\"]([^'\"]+)['\"]",
-        r"\bcover\s*=\s*['\"]([^'\"]+)['\"]",
-        r'<meta[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']',
-        r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*property=["\']og:image["\']',
-    ]
-    for pat in patterns:
-        m = re.search(pat, page_html)
-        if m:
-            url = m.group(1).strip()
-            break
-    else:
-        return ""
-    url = html.unescape(url).replace("\\/", "/")
-    if url.startswith("//"):
-        url = "https:" + url
-    return url if url.startswith("http") else ""
+def _content_js(review_id: str) -> str:
+    """构造 /web/mp/content 的页面内 JS: fetch 正文页 → DOMParser 解析 → 只回传小字段。
 
-
-def fetch_body_ua(url: str) -> dict:
-    """UA 伪装抓 mp.weixin 正文. 返回 {"content": 纯文本, "create_time": 字符串, "cover": 封面图URL}.
-
-    命中风控(HTTP 403 / mp/verifypage / 风控标记页)视为反爬: 打开反爬闸门, 提示在真实
-    Edge 里打开该链接过验证后回终端按回车, 再重试一次(仍失败则返回空正文, 不阻塞后续)。
-    网络异常 / 文章被删(404 等)维持原降级, 不进闸门。
+    正文页有 ~3.5MB(整页 JS/CSS), 全量回传会把 CDP 通道堵死; 故在页面里解析
+    (og:url/og:title/og:image/createTime/#js_content), 只把提炼后的 JSON 交给 Python。
     """
-    try:
-        import requests as _requests
-    except Exception:
-        return {"content": "", "create_time": "", "cover": ""}
-    headers = {
-        "User-Agent": WECHAT_UA,
-        "Referer": "https://mp.weixin.qq.com/",
-        "Origin": "https://mp.weixin.qq.com",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9",
+    rid_lit = json.dumps(review_id)  # JS 字符串字面量(引号/转义安全)
+    return (
+        "(()=>fetch('/web/mp/content?reviewId='+encodeURIComponent(" + rid_lit + "),"
+        "{credentials:'include'}).then(r=>r.text()).then(t=>{"
+        "var doc=new DOMParser().parseFromString(t,'text/html');"
+        # meta 标签手工收集(避免在 JS 里写带引号的属性选择器, 少一层转义)
+        "var m={};var ms=doc.getElementsByTagName('meta');"
+        "for(var i=0;i<ms.length;i++){var k=ms[i].getAttribute('property')||ms[i].getAttribute('name');"
+        "if(k&&!m[k])m[k]=ms[i].getAttribute('content')||'';}"
+        "var jc=doc.querySelector('#js_content');"
+        "var txt=jc?(jc.innerText||jc.textContent||''):'';"
+        "txt=txt.replace(/[ \\t\\u00a0]+/g,' ').replace(/\\s*\\n\\s*/g,'\\n').trim();"
+        "var ct=(t.match(/createTime\\s*=\\s*'([^']*)'/)||[])[1]||'';"
+        # 个别正文页没有 og:url(转载/分享样式), 退回经典页里的 msg_link 变量
+        "var ml=(t.match(/msg_link\\s*=\\s*[\\x22']([^\\x22']+)[\\x22']/)||[])[1]||'';"
+        "return JSON.stringify({link:m['og:url']||ml||'',title:m['og:title']||'',"
+        "image:m['og:image']||'',createTime:ct,contentLen:txt.length,"
+        "content:txt.slice(0," + str(CONTENT_CHARS) + ")});"
+        "}).catch(e=>JSON.stringify({err:String(e)})))()"
+    )
+
+
+def fetch_article_content(reader_url: str, review_id: str, cookie: str = "") -> dict:
+    """调 /web/mp/content 拿单篇正文页 → {"link","title","content","create_time","cover"}.
+
+    失败/无正文返回空字典里的空值(link 为空时调用方应丢弃该篇)。
+    """
+    if not review_id:
+        return {"link": "", "title": "", "content": "", "create_time": "", "cover": ""}
+    d = _run_page_js(cookie, _content_js(review_id), "content",
+                     reader_url or "https://weread.qq.com/")
+    if d.get("err"):
+        logger.warning("content 失败 rid=%s: %s", review_id[:40], str(d.get("err"))[:120])
+    return {
+        "link": (d.get("link") or "").strip(),
+        "title": (d.get("title") or "").strip(),
+        "content": d.get("content") or "",
+        "create_time": (d.get("createTime") or "").strip(),
+        "cover": (d.get("image") or "").strip(),
+        "content_len": int(d.get("contentLen") or 0),
     }
 
-    def _get() -> tuple[int, str, str]:
-        """GET 正文页 → (status, final_url, html). 网络异常返回 (0, "", "")."""
-        try:
-            r = _requests.get(url, headers=headers, timeout=20)
-            return (r.status_code, r.url, r.content.decode("utf-8", errors="replace"))
-        except Exception as e:
-            logger.warning("UA抓正文异常 %s: %s", url, str(e)[:80])
-            return (0, "", "")
 
-    status, final_url, html = _get()
-    if status == 0:  # 网络异常, 原样跳过
-        return {"content": "", "create_time": "", "cover": ""}
-    reason = _antibot_reason(final_url, status, html)
-    if reason:
-        _antibot_wait(
-            f"mp.weixin UA 正文({reason})",
-            f"请在真实 Edge 里打开该链接并完成验证/刷新后回终端按回车:\n    {url}",
-        )
-        status, final_url, html = _get()  # 人工处理后重试一次
-        if _antibot_reason(final_url, status, html):
-            logger.warning("人工处理后 UA 抓正文仍被风控, 跳过: %s", url)
-            return {"content": "", "create_time": "", "cover": ""}
-    # 正文
-    body = ""
-    m = re.search(r'id="js_content"[^>]*>(.*?)</div>', html, re.S)
-    if m:
-        body = re.sub(r"<[^>]+>", "", m.group(1))
-        body = re.sub(r"\s+", " ", body).strip()
-    # createTime
-    ct = ""
-    m2 = re.search(r"createTime\s*=\s*'([^']*)'", html)
-    if m2:
-        ct = m2.group(1).strip()
-    # 封面
-    cover_url = _extract_cover(html)
-    # 截断
-    if len(body) > 1500:
-        body = body[:1500]
-    return {"content": body, "create_time": ct, "cover": cover_url}
+def _normalize_link(link: str) -> str:
+    """规范化原文链接用于去重: 去 fragment(#rd)、去空白、反转义 HTML 实体、补 https。
+
+    同一篇文章在不同上下文里可能带 `#rd`/`#wechat_redirect` 等锚点, 不归一会导致同一篇
+    被当成多篇重复收录。
+    """
+    if not link:
+        return ""
+    link = html.unescape(link).strip()
+    link = link.split("#", 1)[0]
+    if link.startswith("//"):
+        link = "https:" + link
+    return link
 
 
 def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = None) -> tuple[list[dict], list[dict]]:
-    """主入口: 书架订阅号 → articles列表 → UA正文. 返回 (articles, inactive).
+    """主入口: 书架订阅号 → articles列表 → 逐篇 content(链接/正文/时间/封面). 返回 (articles, inactive).
 
-    复用真实 Edge(CDP)拿公众号列表; 正文用 UA 伪装(fetch_body_ua)。cookie 参数已不再需要
-    (登录态在 Edge 会话里), 保留仅为兼容旧签名。
-    seen_links: 已收录链接集合; 命中的文章不再调 fetch_body_ua 抓正文, 提前跳过(省请求/降风控)。
-    articles: [{"title","url","publish_time","summary","source","createTime","image"}...]
+    复用真实 Edge(CDP)。每篇先调 /web/mp/content 取规范原文链接(全格式), 再按链接去重:
+      - 列表页 createTime 超出回溯窗口(WECHAT_LOOKBACK_DAYS, 默认 3 天)的篇不抓正文;
+      - 命中 seen_links(已收录) 的, 跳过不产出(但请求已发出 —— 因为链接只有抓完才知道);
+      - 同一次运行内跨账号重复的(同一篇被多个号转载), 只保留首次出现的。
+    链接为空(抓失败)的篇直接丢弃, 不写进报告/state。
+
+    seen_links: 已收录链接集合(只读, 不改写调用方的集合)。
+    articles: [{"title","link","publish_time","createTime","source","content","summary","image"}]
     inactive: 1年未更新订阅号记录(仅用于日志, 无 fakeid 概念)
     """
     from . import weread_cdp as cdp
@@ -299,6 +307,9 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
         logger.info("书架无订阅公众号, 跳过")
         return [], []
     _sleep_interval()
+    if MAX_ACCOUNTS:
+        subs = subs[:MAX_ACCOUNTS]
+        logger.info("WEREAD_MAX_ACCOUNTS=%d, 只处理前 %d 个订阅号", MAX_ACCOUNTS, len(subs))
 
     # 阅读器页上下文: 取任一所订阅号的 readerUrl 作为统一抓取页(参考: 进任意一个阅读器页)。
     # /web/mp/articles 必须在此上下文发, 否则 -2041。
@@ -306,6 +317,7 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
     if not reader_url:
         logger.warning("书架条目均无 readerUrl(deepLink 缺 v), articles 会回退首页上下文(可能 -2041)")
 
+    seen = set(seen_links or ())  # 拷贝: 不改写调用方集合
     articles = []
     inactive = []
     for sub in subs:
@@ -323,40 +335,59 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
             inactive.append({"name": sub.get("name"), "bookId": book_id,
                              "last_update": latest_ct})
             logger.warning("订阅号[%s] 1年未更新(%s), 记失效", sub.get("name"), latest_ct)
-        # 每篇文章 UA 抓正文
-        for it in item_list:
-            if seen_links and it.get("url") in seen_links:
-                logger.info("跳过已收录: %s", (it.get("t") or "")[:30])
+
+        todo = item_list[:MAX_ITEMS_PER_SOURCE] if MAX_ITEMS_PER_SOURCE else item_list
+        cutoff = (datetime.now() - timedelta(days=LOOKBACK_DAYS)) if LOOKBACK_DAYS > 0 else None
+        skipped_old = 0
+        for it in todo:
+            rid = it.get("rid", "")
+            if not rid:
                 continue
-            art = {
-                "title": it.get("t", ""),
-                "link": it.get("url", ""),
-                "publish_time": it.get("date", ""),
+            if cutoff is not None:
+                d = _list_date(it.get("date", ""))
+                if d is not None and d < cutoff:
+                    skipped_old += 1
+                    continue  # 超出回溯窗口: 不抓正文(省下 ~3.5MB/篇 的请求)
+            info = fetch_article_content(reader_url, rid)
+            _sleep_interval()
+            link = _normalize_link(info.get("link", ""))
+            if not link:
+                logger.warning("跳过(取不到原文链接): %s", (it.get("t") or "")[:30])
+                continue
+            if link in seen:
+                continue  # 已收录(或本轮已被别的号转载过), 不产出
+            seen.add(link)  # 本轮内跨账号去重: 同一篇被多号转载只留首次
+            articles.append({
+                "title": info.get("title") or it.get("t", ""),
+                "link": link,
+                "publish_time": info.get("create_time") or it.get("date", ""),
                 "createTime": it.get("date", ""),
                 "source": sub.get("name"),
                 "summary": "",
-            }
-            if it.get("url"):
-                body_info = fetch_body_ua(it["url"])
-                _sleep_interval()
-                art["content"] = body_info.get("content", "")
-                art["image"] = body_info.get("cover", "")
-                if body_info.get("create_time"):
-                    art["publish_time"] = art["publish_time"] or body_info["create_time"]
-            articles.append(art)
+                "content": info.get("content", ""),
+                "image": info.get("cover", ""),
+            })
+        if skipped_old:
+            logger.info("  [%s] 超出回溯窗口(%s 天)跳过 %d 篇(列表共 %d 篇)",
+                        sub.get("name"), LOOKBACK_DAYS, skipped_old, len(todo))
     logger.info("订阅公众号抓取: %d 篇来自 %d 个订阅号", len(articles), len(subs))
     return articles, inactive
 
 
 def _is_one_year_stale(date_str: str) -> bool:
     """date_str(YYYY-MM-DD) 距今 >1 年判定失效. 空/解析失败不算失效(防误删)."""
-    if not date_str:
+    dt = _list_date(date_str)
+    if dt is None:
         return False
+    return (datetime.now() - dt) > timedelta(days=365)
+
+
+def _list_date(date_str: str) -> datetime | None:
+    """把列表页的日期串(YYYY-MM-DD 或 YYYY-MM-DD HH:MM)解析成 naive datetime; 失败返回 None."""
+    m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", date_str or "")
+    if not m:
+        return None
     try:
-        m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", date_str)
-        if not m:
-            return False
-        dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-        return (datetime.now() - dt) > timedelta(days=365)
+        return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
     except Exception:
-        return False
+        return None
