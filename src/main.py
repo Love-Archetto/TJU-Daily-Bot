@@ -397,6 +397,208 @@ def generate_report(
     return "\n".join(lines)
 
 
+# 综测相关文章的子目录(相对 output/)。与 output/summary/ 同级, 表达"另一份视图"
+# 而非"另一天的报告"。
+COMPREHENSIVE_EVAL_DIR = "综测"
+
+# 综测关键词: 独立于 config/keywords.txt。
+# 用户配置的 keywords.txt 决定 Part1(个人关注点, 会随学期变化); 这里的词决定
+# "哪些文章算综测相关", 是学部综测考核指标(附件1/附件2)里的固定类目, 两者语义不同,
+# 混在一起会导致改 Part1 关键词时静默改变综测文件的收录范围。
+#
+# 结构即归类规则: 一个关键词只属于一个模块, 命中的文章按"第一个匹配到的模块"落位,
+# 保证同一篇文章在综测文件里只出现一次 —— 否则一件活动会在德/智/体多处重复,
+# 无法据以核对总分。模块顺序即归类优先级。
+EVAL_KEYWORDS_BY_MODULE: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("德", (  # 思政教育活动(附件1 E6/E7)、学生工作骨干(E9)、献血(E8)
+        "思政", "党课", "团课", "理论宣讲", "专题报告", "主题党日", "团日",
+        "征文", "读书会", "读书感想", "校史馆", "校史参观", "红色", "观影",
+        "表彰大会", "优秀学生", "标兵", "十佳",
+        "入党", "入团", "积极分子", "发展对象", "党员", "团员", "党建",
+        "班委", "班长", "团支书", "学生干部", "社团", "学生会", "研究生会",
+        "无偿献血", "献血", "见义勇为", "志愿服务",
+    )),
+    ("智", (  # 实践能力(E13)、大创(E14)、竞赛(E15)、学术成果(E16)
+        "大创", "大学生创新创业", "创新创业训练", "结项", "立项",
+        "挑战杯", "互联网+", "数学建模", "ACM", "ICPC", "程序设计竞赛",
+        "学科竞赛", "科技竞赛", "竞赛", "获奖", "获奖名单", "公示",
+        "专利", "软著", "软件著作权", "学术论文", "期刊", "会议论文", "录用",
+        "讲座", "学术报告", "名企行", "企业走访", "行业参观", "招聘",
+        "奖学金", "助学金", "评奖评优", "评优", "保研", "推免",
+    )),
+    ("体", (  # 体育认知与活动(E19/E20)、体测(E21)、体育技能(E22)
+        "运动会", "王正廷杯", "体测", "体育", "篮球", "足球", "羽毛球", "排球",
+        "拔河", "定向越野", "运动队", "体育社团", "心理剧", "心理素质", "拓展训练",
+    )),
+    ("美", (  # 感知鉴赏(E25)、表现与创造(E26-E29)
+        "美育", "文艺", "歌手大赛", "合唱", "迎新晚会", "毕业晚会", "朗诵",
+        "书法", "辩论", "手绘", "文化墙", "第二课堂",
+    )),
+    ("劳", (  # 劳动活动(E32)、志愿(E33)、实践队(E34)、宿舍(E35)
+        "劳动", "劳动教育", "志愿", "义工", "社会实践", "实践队",
+        "宿舍", "寝室", "卫生检查", "优秀宿舍",
+    )),
+)
+
+# 归一化后的扁平词表, 供命中判定使用(顺序无关, 只用于"是否命中综测")
+COMPREHENSIVE_EVAL_KEYWORDS: tuple[str, ...] = tuple(
+    dict.fromkeys(kw for _module, kws in EVAL_KEYWORDS_BY_MODULE for kw in kws)
+)
+
+# 时间范围: 综测加分只认"上一学年开学后至下一学年开学前"(附件1 注1),
+# 而本仓库的 output/ 是跨学年累积的, 因此按抓取窗口(近 N 天)过滤,
+# 由调用方决定窗口大小。
+DEFAULT_EVAL_WINDOW_DAYS = 30
+
+
+def _eval_keyword_hits(article: dict, keywords) -> list[str]:
+    """返回该文章命中的综测关键词(去重保序); 未命中返回空列表."""
+    text = f"{article.get('title', '')} {article.get('summary', '')} " \
+           f"{article.get('content', '')}".lower()
+    hits = []
+    for kw in keywords:
+        if kw.lower() in text and kw not in hits:
+            hits.append(kw)
+    return hits
+
+
+def _append_article(lines: list[str], idx: int, article: dict, hits: list[str]) -> None:
+    """在综测简报中追加一条文章的 Markdown 段落."""
+    lines.append(f"### {idx}. {article.get('title', '无标题')}")
+    lines.append(f"- **来源**: {article.get('source', '未知')}")
+    link = article.get("link", "#")
+    lines.append(f"- **链接**: [{link}]({link})")
+    if article.get("image"):
+        lines.append(f"![封面]({article['image']})")
+    if article.get("publish_time"):
+        lines.append(f"- **时间**: {article.get('publish_time')}")
+    if hits:
+        lines.append(f"- **命中关键词**: {'、'.join(hits)}")
+    if article.get("summary"):
+        lines.append(f"- **摘要**: {article['summary']}")
+    lines.append("")
+
+
+def generate_eval_report(
+    articles: list[dict],
+    profile: dict,
+    window_days: int = DEFAULT_EVAL_WINDOW_DAYS,
+) -> str:
+    """生成"综测相关文章"简报 —— 独立于日报, 只收录命中综测关键词的文章.
+
+    与主日报的区别:
+    - 不分组 Part1/2/3, 而是**按综测五大模块(德智体美劳)归类**, 便于逐项对照加分表
+    - 每篇标注命中的关键词, 方便判断该找学工办要哪类证明
+    - 只收录窗口期内的文章, 因为综测加分有学年时限
+
+    Args:
+        articles: 本轮全部新文章(与主日报同一份输入)
+        profile: 用户画像(写入抬头)
+        window_days: 收录最近 N 天发布的文章; 发布时间缺失的不按日期排除
+
+    Returns:
+        Markdown 文本
+    """
+    now_dt = beijing_now()
+    cutoff = now_dt - timedelta(days=window_days)
+
+    # 归类走单一事实源 EVAL_KEYWORDS_BY_MODULE(见文件头注释): 命中 → 首个匹配的模块
+    buckets: dict[str, list[tuple[dict, list[str]]]] = {
+        m: [] for m, _ in EVAL_KEYWORDS_BY_MODULE
+    }
+    skipped_old = 0
+
+    for a in articles:
+        hits = _eval_keyword_hits(a, COMPREHENSIVE_EVAL_KEYWORDS)
+        if not hits:
+            continue
+        # 日期过滤: 只有解析出发布时间且早于窗口的才排除; 缺时间的不排除,
+        # 宁可多收录也不漏(综测材料漏一条的代价比多看一条高)。
+        ts = _parse_publish_ts(a.get("publish_time", ""))
+        if ts is not None and ts < cutoff:
+            skipped_old += 1
+            continue
+        for module, kws in EVAL_KEYWORDS_BY_MODULE:
+            if any(k in hits for k in kws):
+                buckets[module].append((a, hits))
+                break
+        else:
+            buckets["智"].append((a, hits))  # 兜底: 命中但未归类, 归入智育
+
+    total = sum(len(v) for v in buckets.values())
+    lines = [
+        "# 天津大学综测相关文章简报",
+        "",
+        f"**生成时间**: {now_dt.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"**用户画像**: {profile.get('degree', '未知')} | {profile.get('college', '未知')} | {profile.get('major', '未知')}",
+        f"**收录范围**: 本轮新增文章中命中综测关键词者, 共 {total} 条"
+        + (f"（{skipped_old} 条因超出近 {window_days} 天未收录）" if skipped_old else ""),
+        "",
+        "> 本文件按综测五大模块归类, 仅供**对照加分项、准备支撑材料**使用。",
+        "> 加分项与证明材料要求见学部《本科生综合素质测评考核指标》与《考核涉及活动说明参考》。",
+        "> 注意: 综测加分只认「上一学年开学后至下一学年开学前」内发生的活动, 且需有证明材料。",
+        "",
+        "---",
+        "",
+    ]
+
+    module_titles = {
+        "德": "德 · 思政教育 / 入党入团 / 学生工作 / 献血",
+        "智": "智 · 竞赛 / 大创 / 学术成果 / 讲座 / 奖助",
+        "体": "体 · 体育赛事 / 体测 / 心理活动",
+        "美": "美 · 美育活动 / 文艺演出与比赛",
+        "劳": "劳 · 劳动教育 / 志愿服务 / 实践队 / 宿舍",
+    }
+
+    if total == 0:
+        lines.append("> 本轮无综测相关文章。")
+        lines.append("")
+    else:
+        for module in ["德", "智", "体", "美", "劳"]:
+            items = buckets[module]
+            lines.append(f"## {module_titles[module]}（{len(items)} 条）")
+            lines.append("")
+            if not items:
+                lines.append(f"> 本轮无{module}相关文章。")
+                lines.append("")
+                continue
+            # 有发布时间的按时间倒序(新的在前), 无时间的排在最后:
+            # 用 (是否有时间, 时间) 作键, 避免为了排序引入 datetime.min 这种哨兵值
+            def _sort_key(item):
+                ts = _parse_publish_ts(item[0].get("publish_time", ""))
+                return (1, ts.timestamp()) if ts else (0, 0.0)
+
+            for i, (article, hits) in enumerate(
+                    sorted(items, key=_sort_key, reverse=True), 1):
+                _append_article(lines, i, article, hits)
+
+    return "\n".join(lines)
+
+
+def write_eval_report(
+    articles: list[dict],
+    profile: dict,
+    window_days: int = DEFAULT_EVAL_WINDOW_DAYS,
+) -> str | None:
+    """把综测简报写入 output/综测/YYYY-MM-DD_HH-MM-SS.md, 返回文件名(无内容则 None).
+
+    目录落在 output/ 之下, 因此随 commit_data_and_push 的 AUTO_PATHS 一起被提交 ——
+    但 .gitignore 里已忽略 output/综测/, 实际不入库(综测文件只留本地)。
+    """
+    output_dir = os.path.join(PROJECT_ROOT, "..", "output", COMPREHENSIVE_EVAL_DIR)
+    report = generate_eval_report(articles, profile, window_days)
+    # 无相关文章时不落盘空文件: 否则每天多一个只有抬头的文件, 徒增噪音
+    if "本轮无综测相关文章。" in report:
+        logger.info("综测简报: 本轮无相关文章, 不生成文件")
+        return None
+    os.makedirs(output_dir, exist_ok=True)
+    filename = f"{beijing_now().strftime('%Y-%m-%d_%H-%M-%S')}.md"
+    with open(os.path.join(output_dir, filename), "w", encoding="utf-8") as f:
+        f.write(report)
+    logger.info("综测简报已写入: output/%s/%s", COMPREHENSIVE_EVAL_DIR, filename)
+    return filename
+
+
 def update_index(articles: list[dict], output_file: str) -> None:
     """更新搜索索引."""
     handler = SearchHandler()
@@ -720,6 +922,14 @@ def main() -> int:
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(final_report)
     logger.info("Report written: %s", output_filename)
+
+    # 8.5 综测相关文章简报: 与主日报同一份输入, 单独落 output/综测/。
+    #     放在主报告之后、state 落盘之前: 它要读 new_articles 的摘要(第 6 步已写回),
+    #     而失败不应该连累主流程 —— 综测文件是"附加视图", 主日报才是必须产物。
+    try:
+        write_eval_report(new_articles, profile)
+    except Exception as e:
+        logger.warning("综测简报生成失败(不影响主日报): %s", e)
 
     # 9. 更新状态
     for a in new_articles:
