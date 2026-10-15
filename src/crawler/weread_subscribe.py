@@ -21,7 +21,7 @@
 反爬/UA 伪装/验证码问题一并消失(旧的 fetch_body_ua 已删除)。
 
 依赖: playwright(项目已装) / MS Edge。不再需要 WEREAD_COOKIE(登录态在 Edge 会话里)。
-默认间隔: 所有请求之间 3s±1s。触发反爬(articles -2041 防水墙)时打印提示, 等待用户在
+默认间隔: 所有请求之间 4s±1s。触发反爬(articles -2041 防水墙)时打印提示, 等待用户在
   Edge 里刷新并完成验证后回终端按回车继续; 非交互环境(CI/管道)退避 180s。
 """
 
@@ -37,9 +37,10 @@ from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 
-# 请求间隔(秒): 3s ± 1s(原 180±60s 过慢; 间隔短时靠下方反爬闸门人工兜底)。
+# 请求间隔(秒): 4s ± 1s。2026-10-15 由 3±1s 调高: 实测连续拉多个 3.5MB 正文页时,
+# 约 1/3 会撞上 mp.weixin 的「验证」拦截页(仅 2KB)而取不到 og:url, 拉长间隔可降触发率。
 # 回填(一次性重抓全部在列文章, 上千次请求)可用 WEREAD_INTERVAL/WEREAD_INTERVAL_SPREAD 调快。
-REQUEST_INTERVAL_MEAN = float(os.environ.get("WEREAD_INTERVAL", "3.0") or 3.0)
+REQUEST_INTERVAL_MEAN = float(os.environ.get("WEREAD_INTERVAL", "4.0") or 4.0)
 REQUEST_INTERVAL_SPREAD = float(os.environ.get("WEREAD_INTERVAL_SPREAD", "1.0") or 1.0)
 
 # 非交互环境(CI/管道, stdin 非终端)触发反爬后的退避秒数(无真人可刷新, 慢速重试更安全)
@@ -281,6 +282,63 @@ def _normalize_link(link: str) -> str:
     return link
 
 
+def _consume_one(entry: dict, reader_url: str, seen: set[str],
+                 articles: list[dict]) -> bool:
+    """抓取一篇(链接+正文+时间+封面)并写入 articles。
+
+    Args:
+        entry: {"sub": 订阅号 dict, "item": 列表条目 dict}
+        reader_url: 阅读器页 URL(请求上下文)
+        seen: 已收录链接集合(原地增补)
+        articles: 产出列表(原地追加)
+
+    Returns:
+        True  = 该条已了结(拿到链接; "已收录因而不产出"也算了结)
+        False = 取不到链接, 调用方应把它留在待重试集里
+    """
+    it, sub = entry["item"], entry["sub"]
+    info = fetch_article_content(reader_url, it.get("rid", ""))
+    _sleep_interval()
+    link = _normalize_link(info.get("link", ""))
+    if not link:
+        # 多为瞬时风控: 返回 2KB 的「验证」页而非 3.5MB 正文, og:url/msg_link 都是空。
+        # 不是文章本身的问题 —— 何时重试由调用方决定(见 fetch_subscribed_articles 轮末重试)。
+        logger.warning("取不到原文链接(留待重试): %s", (it.get("t") or "")[:30])
+        return False
+    if link in seen:
+        return True  # 已收录(或本轮已被别的号转载过), 不产出
+    seen.add(link)  # 本轮内跨账号去重: 同一篇被多号转载只留首次
+    articles.append({
+        "title": info.get("title") or it.get("t", ""),
+        "link": link,
+        "publish_time": info.get("create_time") or it.get("date", ""),
+        "createTime": it.get("date", ""),
+        "source": sub.get("name"),
+        "summary": "",
+        "content": info.get("content", ""),
+        "image": info.get("cover", ""),
+    })
+    return True
+
+
+def _ask_continue_retry(count: int) -> bool:
+    """问用户是否继续重抓取不到链接的 count 篇。Y=继续, N=停止。
+
+    非交互环境(stdin 非终端, 如 CI/管道)返回 False —— 没人能回答, 不能无限循环。
+    """
+    print(f"\n{CYAN}[待重试] 仍有 {count} 篇取不到原文链接(多为瞬时风控拦截)。{EOM}",
+          flush=True)
+    try:
+        if not sys.stdin.isatty():
+            logger.info("非交互环境, 不再重试剩余 %d 篇", count)
+            return False
+        ans = input(f"{CYAN}继续抓取这 {count} 篇? [Y=继续 / N=停止]: {EOM}").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        logger.info("用户中断, 停止重试")
+        return False
+    return ans in ("y", "yes", "是")
+
+
 def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = None) -> tuple[list[dict], list[dict]]:
     """主入口: 书架订阅号 → articles列表 → 逐篇 content(链接/正文/时间/封面). 返回 (articles, inactive).
 
@@ -288,7 +346,10 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
       - 列表页 createTime 超出回溯窗口(WECHAT_LOOKBACK_DAYS, 默认 3 天)的篇不抓正文;
       - 命中 seen_links(已收录) 的, 跳过不产出(但请求已发出 —— 因为链接只有抓完才知道);
       - 同一次运行内跨账号重复的(同一篇被多个号转载), 只保留首次出现的。
-    链接为空(抓失败)的篇直接丢弃, 不写进报告/state。
+    取不到链接的篇(多为瞬时风控, 返回 2KB「验证」页而非 3.5MB 正文)**不当场丢弃**:
+    条目连同所属号留在待重试集(位置保留), 整轮跑完后再整体重试 2 次; 若仍有剩余,
+    交互式问用户是否继续(Y=继续重抓 / N=停止); 非交互环境(CI/管道)直接停, 不无限循环。
+    最终仍取不到的篇不写进报告/state —— 链接是去重键, 空链接进去会污染 processed_links。
 
     seen_links: 已收录链接集合(只读, 不改写调用方的集合)。
     articles: [{"title","link","publish_time","createTime","source","content","summary","image"}]
@@ -320,6 +381,8 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
     seen = set(seen_links or ())  # 拷贝: 不改写调用方集合
     articles = []
     inactive = []
+    # 取不到链接的条目(保留所属号与列表位置), 整轮跑完后统一重试
+    pending: list[dict] = []
     for sub in subs:
         book_id = sub.get("bookId", "")
         if not book_id:
@@ -348,29 +411,37 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
                 if d is not None and d < cutoff:
                     skipped_old += 1
                     continue  # 超出回溯窗口: 不抓正文(省下 ~3.5MB/篇 的请求)
-            info = fetch_article_content(reader_url, rid)
-            _sleep_interval()
-            link = _normalize_link(info.get("link", ""))
-            if not link:
-                logger.warning("跳过(取不到原文链接): %s", (it.get("t") or "")[:30])
-                continue
-            if link in seen:
-                continue  # 已收录(或本轮已被别的号转载过), 不产出
-            seen.add(link)  # 本轮内跨账号去重: 同一篇被多号转载只留首次
-            articles.append({
-                "title": info.get("title") or it.get("t", ""),
-                "link": link,
-                "publish_time": info.get("create_time") or it.get("date", ""),
-                "createTime": it.get("date", ""),
-                "source": sub.get("name"),
-                "summary": "",
-                "content": info.get("content", ""),
-                "image": info.get("cover", ""),
-            })
+            entry = {"sub": sub, "item": it}
+            if not _consume_one(entry, reader_url, seen, articles):
+                # 不当场丢弃: 保留条目与位置, 轮末统一重试(见下方轮末重试)
+                pending.append(entry)
         if skipped_old:
             logger.info("  [%s] 超出回溯窗口(%s 天)跳过 %d 篇(列表共 %d 篇)",
                         sub.get("name"), LOOKBACK_DAYS, skipped_old, len(todo))
     logger.info("订阅公众号抓取: %d 篇来自 %d 个订阅号", len(articles), len(subs))
+
+    # 轮末重试: 对取不到链接的条目再整体循环两次。这类失败多为瞬时风控
+    # (返回 2KB「验证」页而非 3.5MB 正文), 隔几秒重试通常就拿到了。
+    for rnd in (1, 2):
+        if not pending:
+            break
+        logger.info("第 %d 轮重试: %d 篇待重抓", rnd, len(pending))
+        pending = [e for e in pending
+                   if not _consume_one(e, reader_url, seen, articles)]
+
+    # 两次重试后仍有剩余 -> 问用户是否继续(Y=继续 / N=停止)。
+    # 非交互环境直接停, 避免无人值守时无限循环。
+    while pending:
+        if not _ask_continue_retry(len(pending)):
+            break
+        logger.info("用户选择继续: 再抓 %d 篇", len(pending))
+        pending = [e for e in pending
+                   if not _consume_one(e, reader_url, seen, articles)]
+
+    if pending:
+        logger.warning("最终仍有 %d 篇取不到原文链接, 本轮不收录(下轮窗口内会再试): %s",
+                       len(pending),
+                       ", ".join((e["item"].get("t") or "")[:20] for e in pending[:5]))
     return articles, inactive
 
 
