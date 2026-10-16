@@ -55,6 +55,17 @@ MAX_ITEMS_PER_SOURCE = int(os.environ.get("WEREAD_MAX_ITEMS_PER_SOURCE", "0") or
 # 最多处理多少个订阅号(0 = 不限制)
 MAX_ACCOUNTS = int(os.environ.get("WEREAD_MAX_ACCOUNTS", "0") or 0)
 
+# 同一个 errCode 连续出现多少次, 判定"卡死"并中止本轮抓取。
+# 依据: 2026-10-16 那次会话失效, -2014 连续刷了 70 个号(每个号还要等 4s 间隔),
+# 白跑十几分钟; 而后半段 -2012 又刷了 20 多个。"偶尔一两个号报错"是正常的,
+# "同一个错误码连着 N 个号"则说明是会话/账号层面的问题, 继续扫下去只是浪费请求。
+SAME_ERR_ABORT = int(os.environ.get("WEREAD_SAME_ERR_ABORT", "8") or 0)
+
+# 最近一次 fetch_articles 的微信错误码与原文(errMsg)。None = 正常。
+# errMsg 是排查的关键: -2010 的原文是"用户不存在"(登录态失效), 只看数字认不出病因。
+_LAST_ARTICLES_ERR: int | None = None
+_LAST_ARTICLES_MSG: str = ""
+
 
 def _env_float(name: str, default: float) -> float:
     """读浮点环境变量; 缺省/空/坏值都用 default(注意 '0' 是合法值, 不能掉进 or 分支)."""
@@ -179,7 +190,7 @@ def fetch_articles(cookie: str, book_id: str, reader_url: str = "",
     url = f"/web/mp/articles?bookId={book_id}&offset={offset}"
     js_safe = url.replace("\\", "\\\\").replace("'", "\\'")
     js = ("(()=>fetch('" + js_safe + "',{credentials:'include'})"
-          ".then(r=>r.json()).then(o=>JSON.stringify({errCode:o.errCode,"
+          ".then(r=>r.json()).then(o=>JSON.stringify({errCode:o.errCode,errMsg:o.errMsg||'',"
           "items:(o.reviews||[]).map(g=>(g.subReviews||[]).map(s=>{var mi=(s.review&&s.review.mpInfo)||{};"
           "return {t:mi.title,rid:(s.review&&s.review.reviewId)||'',"
           "ct:s.review?Number(s.review.createTime||0):0}})).flat(),"
@@ -187,23 +198,31 @@ def fetch_articles(cookie: str, book_id: str, reader_url: str = "",
           ".catch(e=>JSON.stringify({err:String(e)})))()")
     page_url = reader_url or "https://weread.qq.com/"
     d = _run_page_js(cookie, js, "articles", page_url)
+    global _LAST_ARTICLES_ERR, _LAST_ARTICLES_MSG
     if d.get("errCode"):
         err = d.get("errCode")
+        msg = str(d.get("errMsg") or "")
+        _LAST_ARTICLES_ERR, _LAST_ARTICLES_MSG = err, msg
         # -2041 = 触发腾讯防水墙/验证码: 需在真实 Edge 的阅读器页刷新过验证后才恢复
         if err == -2041:
-            logger.warning("articles errCode=-2041(防水墙验证码) bookId=%s", book_id)
+            logger.warning("articles errCode=-2041(%s) bookId=%s", msg or "防水墙验证码", book_id)
             _antibot_wait(
                 f"articles -2041(bookId={book_id})",
                 "请到打开的 Edge 窗口刷新公众号阅读器页, 手动完成验证码/滑块",
             )
             d = _run_page_js(cookie, js, "articles", page_url)  # 人工处理后重试一次
             if d.get("errCode"):
-                logger.warning("人工处理后 articles 仍 errCode=%s bookId=%s, 跳过该号",
-                               d.get("errCode"), book_id)
+                _LAST_ARTICLES_ERR = d.get("errCode")
+                _LAST_ARTICLES_MSG = str(d.get("errMsg") or "")
+                logger.warning("人工处理后 articles 仍 errCode=%s(%s) bookId=%s, 跳过该号",
+                               _LAST_ARTICLES_ERR, _LAST_ARTICLES_MSG, book_id)
                 return []
         else:
-            logger.warning("articles errCode=%s bookId=%s", err, book_id)
+            # 必须带上 errMsg: errCode 本身认不出病因。例如 -2010 的原文是"用户不存在",
+            # 一眼就知道是登录态失效而不是频控/UA —— 只记数字会把排查带偏。
+            logger.warning("articles errCode=%s(%s) bookId=%s", err, msg, book_id)
             return []
+    _LAST_ARTICLES_ERR, _LAST_ARTICLES_MSG = None, ""
     items = [it for it in d.get("items", []) if it.get("rid")]
     # createTime 时间戳 → 北京日期
     for it in items:
@@ -383,6 +402,9 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
     inactive = []
     # 取不到链接的条目(保留所属号与列表位置), 整轮跑完后统一重试
     pending: list[dict] = []
+    same_err: int | None = None   # 上一个号的错误码(用于判"同一错误连续出现")
+    same_err_hits = 0
+    aborted = False
     for sub in subs:
         book_id = sub.get("bookId", "")
         if not book_id:
@@ -391,7 +413,23 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
         item_list = fetch_articles("", book_id, reader_url)
         _sleep_interval()
         if not item_list:
+            # 连续同一个错误码 -> 会话/账号层面出问题, 提前收手(见 SAME_ERR_ABORT 注释)
+            err = _LAST_ARTICLES_ERR
+            if err is not None and SAME_ERR_ABORT > 0:
+                if err == same_err:
+                    same_err_hits += 1
+                else:
+                    same_err, same_err_hits = err, 1
+                if same_err_hits >= SAME_ERR_ABORT:
+                    logger.error(
+                        "连续 %d 个订阅号都返回同一个错误 errCode=%s(%s) —— 判定会话已失效, "
+                        "提前中止本轮公众号抓取(已抓 %d 篇)。请检查调试 Edge 的微信读书登录态后重跑。",
+                        same_err_hits, err, _LAST_ARTICLES_MSG, len(articles),
+                    )
+                    aborted = True
+                    break
             continue
+        same_err, same_err_hits = None, 0   # 成功一次即清零
         # 判定 1 年未更新: 用最新一篇 createTime
         latest_ct = item_list[0].get("date", "")
         if latest_ct and _is_one_year_stale(latest_ct):
@@ -419,6 +457,11 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
             logger.info("  [%s] 超出回溯窗口(%s 天)跳过 %d 篇(列表共 %d 篇)",
                         sub.get("name"), LOOKBACK_DAYS, skipped_old, len(todo))
     logger.info("订阅公众号抓取: %d 篇来自 %d 个订阅号", len(articles), len(subs))
+
+    # 会话已判定失效: 重试没有意义(报错来自账号层面, 不是单篇抽取失败), 直接跳过
+    if aborted:
+        logger.warning("本轮因会话失效提前中止, 跳过轮末重试")
+        return articles, inactive
 
     # 轮末重试: 对取不到链接的条目再整体循环两次。这类失败多为瞬时风控
     # (返回 2KB「验证」页而非 3.5MB 正文), 隔几秒重试通常就拿到了。
