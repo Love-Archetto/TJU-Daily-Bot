@@ -52,11 +52,13 @@ MIN_ARTICLES = int(_RAW_MIN) if _RAW_MIN.isdigit() else 20
 
 
 def main() -> int:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    from src import main as M
+    from src.crawler import weread_subscribe as ws
+
+    # 复用主流程的日志配置: 控制台 + logs/run-*.log(UTF-8)。
+    # 原先只 basicConfig 到 stderr, 而本脚本常要跑几十分钟, 中断/失败后无从查证。
+    log_path = M._setup_logging()
+    logging.getLogger(__name__).info("回填开始, 日志: %s", log_path or "(未落盘)")
 
     limit_accounts = int(os.environ.get("LIMIT_ACCOUNTS", "0") or 0)
     limit_items = int(os.environ.get("LIMIT_ITEMS", "0") or 0)
@@ -69,9 +71,6 @@ def main() -> int:
         os.environ["WEREAD_MAX_ACCOUNTS"] = str(limit_accounts)
     if limit_items:
         os.environ["WEREAD_MAX_ITEMS_PER_SOURCE"] = str(limit_items)
-
-    from src import main as M
-    from src.crawler import weread_subscribe as ws
 
     state = M.load_state()
     old = list(state.get("processed_links", []))
@@ -113,7 +112,7 @@ def main() -> int:
     if len(articles) < MIN_ARTICLES:
         print(f"错误: 只抓到 {len(articles)} 篇(< MIN_ARTICLES={MIN_ARTICLES}), "
               f"疑似大面积失败, state.json 未被改动。")
-        print("       确认确实该这么少时, 用 MIN_ARTICLES=1 重跑。请先看 tools/_backfill.log。")
+        print(f"       确认确实该这么少时, 用 MIN_ARTICLES=1 重跑。请先看日志: {log_path or 'logs/run-*.log'}")
         return 1
 
     # 明细落盘(核验用)

@@ -62,6 +62,67 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 运行日志保留份数(logs/run-*.log); 超出按文件名时间戳删最旧的
+MAX_LOG_FILES = 30
+
+
+def _rotate_logs(log_dir: str, keep: int = MAX_LOG_FILES) -> None:
+    """只保留最近 keep 份 run-*.log, 其余按时间戳删最旧的。
+
+    只动 run-*.log —— logs/ 下若有人放别的文件一律不碰, 避免误删。
+    文件名形如 run-2026-10-16_13-03-13.log, 字典序即时间序。
+    """
+    if keep <= 0:
+        return
+    try:
+        names = sorted(f for f in os.listdir(log_dir)
+                       if f.startswith("run-") and f.endswith(".log"))
+    except OSError:
+        return
+    for name in names[:-keep]:
+        try:
+            os.remove(os.path.join(log_dir, name))
+        except OSError as e:
+            logger.debug("清理旧日志失败 %s: %s", name, e)
+
+
+def _setup_logging() -> str | None:
+    """把日志同时写到控制台与 logs/run-<北京时间>.log(UTF-8)。
+
+    为什么必须落盘: 原先只写 stderr, 窗口一关日志就没了 —— 出问题只能重跑复现,
+    而抓取类问题(风控拦截、取不到链接)恰恰需要事后看完整时间线。
+
+    encoding="utf-8" 是硬要求: Windows 默认 GBK, 中文日志会变成乱码。
+    任何一步失败(只读盘/权限/磁盘满)都降级为"仅控制台", 绝不拖垮主流程。
+
+    Returns:
+        日志文件绝对路径; 落盘失败返回 None。
+    """
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    # 幂等: 重复调用(回填脚本复用/测试)不叠加 handler, 否则同一行会写多遍
+    for h in list(root.handlers):
+        root.removeHandler(h)
+
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+    root.addHandler(console)
+
+    try:
+        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        stamp = beijing_now().strftime("%Y-%m-%d_%H-%M-%S")
+        path = os.path.abspath(os.path.join(log_dir, f"run-{stamp}.log"))
+        fh = logging.FileHandler(path, encoding="utf-8")
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+        _rotate_logs(log_dir)
+        return path
+    except Exception as e:
+        logger.warning("日志落盘失败, 本次仅输出到控制台: %s", e)
+        return None
+
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(PROJECT_ROOT, "..", "state.json")
 SOURCES_PATH = os.path.join(PROJECT_ROOT, "..", "config", "sources.yaml")
@@ -750,7 +811,13 @@ def main() -> int:
     退出码: 0 = 成功且已确认远端 main 前进; 1 = 硬失败(守卫拒绝/git 不可用/切不过去);
     2 = 报告已生成但没推上去(数据在本地, 补一次 push 即可)。
     """
+    # 先装日志(控制台 + logs/run-*.log), 保证本轮全程可事后追溯
+    log_path = _setup_logging()
     logger.info("TJU Daily Bot starting...")
+    if log_path:
+        logger.info("本轮日志: %s", log_path)
+    else:
+        logger.warning("本轮日志未落盘(仅控制台)")
 
     # 0. 分支守卫 —— 必须早于 load_state():
     #    读 state.json/config/ 与写、推必须是同一条 lineage, 否则提交会落在错误分支上,

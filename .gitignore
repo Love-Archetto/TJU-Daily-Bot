@@ -16,3 +16,5 @@ tools/_backfill_out.jsonl
 tools/_backfill.log
 # 综测文件只留本地, 永不推送(超出 10-01 版本的一行, 见提交说明)
 output/综测/
+# 运行日志(run-*.log)只留本地, 便于事后排查; 不入库
+logs/
