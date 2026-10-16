@@ -55,7 +55,7 @@ echo.
 
 REM ---- 4. 执行主流程：抓取 + AI + 报告 + Git Push ----
 REM     CI=true  -> 走 main.py 的 commit_and_push（data: 前缀 + git push origin main）
-REM     FORCE=1  -> 绕过"一天一次"调度闸门，保证每次真的抓
+REM     FORCE=1  -> 绕过「一天一次」调度闸门，保证每次真的抓
 REM     PYTHONIOENCODING=utf-8 -> 避免 Windows 控制台 GBK 撞 emoji 崩溃
 echo [INFO] 正在抓取并生成报告（CI=true 将自动 git 提交并推送）...
 set "CI=true"
