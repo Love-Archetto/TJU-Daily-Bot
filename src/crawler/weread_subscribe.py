@@ -55,10 +55,18 @@ MAX_ITEMS_PER_SOURCE = int(os.environ.get("WEREAD_MAX_ITEMS_PER_SOURCE", "0") or
 # 最多处理多少个订阅号(0 = 不限制)
 MAX_ACCOUNTS = int(os.environ.get("WEREAD_MAX_ACCOUNTS", "0") or 0)
 
-# 同一个 errCode 连续出现多少次, 判定"卡死"并中止本轮抓取。
-# 依据: 2026-10-16 那次会话失效, -2014 连续刷了 70 个号(每个号还要等 4s 间隔),
-# 白跑十几分钟; 而后半段 -2012 又刷了 20 多个。"偶尔一两个号报错"是正常的,
-# "同一个错误码连着 N 个号"则说明是会话/账号层面的问题, 继续扫下去只是浪费请求。
+# errCode 分类(2026-10-17 实测拿到微信 errMsg 原文后确认):
+#   -2014 = "请求频率过高"  -> 限流。不是会话坏了, 正确做法是退避后重试, 不该中止。
+#   -2010 = "用户不存在"    -> 登录态被吊销
+#   -2012 = "登录超时"      -> wr_skey 过期(约 90 分钟寿命)
+#   -2013 = /web/login/renewal 续期被风控(见 spirodelazz/weread-keepalive)
+#   -2041 = 腾讯防水墙验证码 -> 需人工在浏览器里过, 见 _antibot_wait
+RATE_LIMIT_CODES = (-2014,)
+SESSION_DEAD_CODES = (-2010, -2012, -2013)
+
+# 同一个"会话失效类"错误码连续出现多少次 -> 判定会话已废, 提前中止本轮。
+# 只统计 SESSION_DEAD_CODES: 限流会自愈, 不该触发中止
+# (2026-10-17 那次就是被连续的 -2014 误判成"会话已失效"而中止的)。
 SAME_ERR_ABORT = int(os.environ.get("WEREAD_SAME_ERR_ABORT", "8") or 0)
 
 # 最近一次 fetch_articles 的微信错误码与原文(errMsg)。None = 正常。
@@ -77,6 +85,13 @@ def _env_float(name: str, default: float) -> float:
     except ValueError:
         logger.warning("环境变量 %s=%r 不是数字, 用默认 %s", name, raw, default)
         return default
+
+
+# 限流退避: 首次 RATE_LIMIT_BACKOFF 秒, 每次翻倍至 RATE_LIMIT_MAX_BACKOFF 封顶,
+# 单个号最多重试 RATE_LIMIT_TRIES 次。放在 _env_float 之后, 因为它要用它。
+RATE_LIMIT_BACKOFF = _env_float("WEREAD_RATE_BACKOFF", 30.0)
+RATE_LIMIT_MAX_BACKOFF = _env_float("WEREAD_RATE_BACKOFF_MAX", 300.0)
+RATE_LIMIT_TRIES = int(os.environ.get("WEREAD_RATE_TRIES", "3") or 3)
 
 
 # 只对"最近 N 天"发表的列表文章去抓正文(0 = 不限制, 回填时用)。
@@ -412,18 +427,40 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
         logger.info("== 抓取订阅号[%s] %s ==", sub.get("name"), book_id)
         item_list = fetch_articles("", book_id, reader_url)
         _sleep_interval()
+
+        # 限流(-2014): 退避后重抓该号。这是频率问题, 会话本身没坏, 不能算作"会话失效"。
+        if not item_list and _LAST_ARTICLES_ERR in RATE_LIMIT_CODES:
+            for attempt in range(1, RATE_LIMIT_TRIES + 1):
+                wait = min(RATE_LIMIT_BACKOFF * (2 ** (attempt - 1)), RATE_LIMIT_MAX_BACKOFF)
+                logger.warning("触发微信读书限流 errCode=%s(%s), 退避 %.0fs 后重抓该号(%d/%d)",
+                               _LAST_ARTICLES_ERR, _LAST_ARTICLES_MSG, wait,
+                               attempt, RATE_LIMIT_TRIES)
+                time.sleep(wait)
+                item_list = fetch_articles("", book_id, reader_url)
+                _sleep_interval()
+                if item_list or _LAST_ARTICLES_ERR not in RATE_LIMIT_CODES:
+                    break
+            if not item_list and _LAST_ARTICLES_ERR in RATE_LIMIT_CODES:
+                logger.error(
+                    "退避重试 %d 次后仍被限流(errCode=-2014 请求频率过高) —— 本轮抓取到此为止, "
+                    "已抓 %d 篇。这是频率问题, 登录态没坏; 隔 10 分钟以上重跑即可, 无需重新扫码。",
+                    RATE_LIMIT_TRIES, len(articles),
+                )
+                aborted = True
+                break
+
         if not item_list:
-            # 连续同一个错误码 -> 会话/账号层面出问题, 提前收手(见 SAME_ERR_ABORT 注释)
+            # 只对"会话失效类"错误码计数: 见 SESSION_DEAD_CODES 注释
             err = _LAST_ARTICLES_ERR
-            if err is not None and SAME_ERR_ABORT > 0:
+            if err in SESSION_DEAD_CODES and SAME_ERR_ABORT > 0:
                 if err == same_err:
                     same_err_hits += 1
                 else:
                     same_err, same_err_hits = err, 1
                 if same_err_hits >= SAME_ERR_ABORT:
                     logger.error(
-                        "连续 %d 个订阅号都返回同一个错误 errCode=%s(%s) —— 判定会话已失效, "
-                        "提前中止本轮公众号抓取(已抓 %d 篇)。请检查调试 Edge 的微信读书登录态后重跑。",
+                        "连续 %d 个订阅号都返回同一个错误 errCode=%s(%s) —— 判定登录态已失效, "
+                        "提前中止本轮公众号抓取(已抓 %d 篇)。请在调试 Edge 里重新登录微信读书后重跑。",
                         same_err_hits, err, _LAST_ARTICLES_MSG, len(articles),
                     )
                     aborted = True
@@ -458,9 +495,9 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
                         sub.get("name"), LOOKBACK_DAYS, skipped_old, len(todo))
     logger.info("订阅公众号抓取: %d 篇来自 %d 个订阅号", len(articles), len(subs))
 
-    # 会话已判定失效: 重试没有意义(报错来自账号层面, 不是单篇抽取失败), 直接跳过
+    # 已判定会话失效/持续限流: 重试没有意义(报错来自账号层面, 不是单篇抽取失败), 直接跳过
     if aborted:
-        logger.warning("本轮因会话失效提前中止, 跳过轮末重试")
+        logger.warning("本轮已提前中止, 跳过轮末重试")
         return articles, inactive
 
     # 轮末重试: 对取不到链接的条目再整体循环两次。这类失败多为瞬时风控
