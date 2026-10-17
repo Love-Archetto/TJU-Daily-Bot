@@ -297,14 +297,23 @@ def _content_js(review_id: str) -> str:
 
 
 def _content_head_js(review_id: str, limit: int) -> str:
-    """构造"只读前 limit 字节"的 /web/mp/content JS: 流式读取, 够了就 reader.cancel()。
+    """构造【边读边找链接, 一找到就停】的 /web/mp/content JS(流式读取 + reader.cancel)。
 
-    动机: 取原文链接只需要正文页开头一小段。steptian/weread-mp 的实测记录是
-    og:url 在 ~17KB 偏移(其余: picture_page_info_list ~225KB, 正文 ~557KB),
-    而整页约 3.5MB。默认读 96KB 留足余量。
+    **为什么不按字节数停**: getReader() 按块投递, 无法预知下一块多大, 所以
+    【读到 >= N 字节就停】必然整块溢出。2026-10-17 实测: 数据块粒度约 36KB,
+    阈值设 96KB 时实际每题读 ~144KB(4 块), 平均 143,318 字节。
 
-    用途: 判断微信的 -2014(请求频率过高)是按"请求数"还是"字节数"计 —— 若按字节,
-    这个模式能把每篇的流量砍到 1/36 而请求数不变。
+    **改为能提取出链接就立刻停**: og:url 出现在第一块内, 命中即 cancel, 实测
+    2026-10-18 对天津大学 8 篇各读 36,295~36,403 字节(平均 36,361), 全部 stopped=found,
+    没有任何一篇走到兜底上限 —— 比字节阈值版又省 4 倍, 是全文(3.5MB)的 1/96。
+    而且比"猜一个字节数"鲁棒: 页面结构变了也不会失效。
+
+    注意: 因为只读第一块, 正文页里的 createTime 变量拿不到(它在后面)。这对调用方无影响
+    —— 列表阶段本身带 createTime 时间戳, _consume_one 会回退到它。
+
+    limit 退化成**兜底上限**: 万一链接迟迟不出现(验证页/异常页), 读到该字节数为止。
+
+    stopped 字段: found=命中链接 / limit=触到兜底上限 / eof=响应读完。
     """
     rid_lit = json.dumps(review_id)  # JS 字符串字面量(引号/转义安全)
     return (
@@ -312,27 +321,35 @@ def _content_head_js(review_id: str, limit: int) -> str:
         "{credentials:'include'}).then(r=>{"
         "if(!r.body)return JSON.stringify({err:'no_body_stream'});"
         "var rd=r.body.getReader(),dec=new TextDecoder('utf-8'),t='',total=0;"
-        "function pump(){return rd.read().then(res=>{"
-        "if(res.done)return t;"
-        "total+=res.value.length;"
-        "t+=dec.decode(res.value,{stream:true});"
-        "if(total>=" + str(int(limit)) + "){try{rd.cancel()}catch(e){}return t;}"
-        "return pump();});}"
-        "return pump().then(t=>{"
-        # " = 双引号; 用 \x22 让 JS 正则里的字符类只认 ["'] 两种引号, 避开 Python 转义
+        # 链接提取: og:url 优先, 其次经典页里的 msg_link 变量。
+        # \x22 表示双引号, 让正则字符类只认双引号/单引号两种写法, 避开 Python 转义。
+        "function link(){"
         "var og=t.match(/property=[\x22']og:url[\x22'][^>]*content=[\x22']([^\x22']+)[\x22']/i)"
         "||t.match(/content=[\x22']([^\x22']+)[\x22'][^>]*property=[\x22']og:url[\x22']/i);"
+        "if(og&&og[1])return og[1];"
+        "var ml=t.match(/msg_link\\s*=\\s*[\x22']([^\x22']+)[\x22']/);"
+        "return (ml&&ml[1])||'';}"
+        # 收尾: 拼结果 JSON, stopped 标明是哪种停法
+        "function finish(stop){"
         "var ot=t.match(/property=[\x22']og:title[\x22'][^>]*content=[\x22']([^\x22']*)[\x22']/i)"
         "||t.match(/content=[\x22']([^\x22']*)[\x22'][^>]*property=[\x22']og:title[\x22']/i);"
         "var im=t.match(/property=[\x22']og:image[\x22'][^>]*content=[\x22']([^\x22']+)[\x22']/i)"
         "||t.match(/content=[\x22']([^\x22']+)[\x22'][^>]*property=[\x22']og:image[\x22']/i);"
         "var ct=(t.match(/createTime\\s*=\\s*'([^']*)'/)||[])[1]||'';"
-        # 个别正文页没有 og:url(转载/分享样式), 退回经典页里的 msg_link 变量
-        "var ml=(t.match(/msg_link\\s*=\\s*[\x22']([^\x22']+)[\x22']/)||[])[1]||'';"
-        "return JSON.stringify({bytes:total,link:(og?og[1]:(ml||''))||'',"
-        "title:ot?ot[1]:'',image:im?im[1]:'',createTime:ct});"
-        "});}).catch(e=>JSON.stringify({err:String(e)})))()"
+        "return JSON.stringify({bytes:total,chars:t.length,stopped:stop,link:link(),"
+        "title:ot?ot[1]:'',image:im?im[1]:'',createTime:ct});}"
+        # 读取循环: 每读一块先看链接出现没有 —— 出现就 cancel, 这是省流的关键
+        "function pump(){return rd.read().then(res=>{"
+        "if(res.done)return finish('eof');"
+        "total+=res.value.length;"
+        "t+=dec.decode(res.value,{stream:true});"
+        "if(link()){try{rd.cancel()}catch(e){}return finish('found');}"
+        "if(total>=" + str(int(limit)) + "){try{rd.cancel()}catch(e){}return finish('limit');}"
+        "return pump();});}"
+        "return pump();"
+        "}).catch(e=>JSON.stringify({err:String(e)})))()"
     )
+
 
 
 # 是否用"只读前 N 字节"的方式取链接(0 = 关闭, 一律全量读取)。
@@ -362,6 +379,9 @@ def fetch_article_head(reader_url: str, review_id: str, cookie: str = "") -> dic
         "content_len": 0,
         "head_bytes": True,
         "bytes_read": int(d.get("bytes") or 0),
+        "chars_read": int(d.get("chars") or 0),
+        # found=命中链接就停 / limit=触到兜底上限 / eof=响应读完
+        "stopped": d.get("stopped") or "",
     }
 
 
