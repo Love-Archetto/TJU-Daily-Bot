@@ -292,6 +292,75 @@ def _content_js(review_id: str) -> str:
     )
 
 
+def _content_head_js(review_id: str, limit: int) -> str:
+    """构造"只读前 limit 字节"的 /web/mp/content JS: 流式读取, 够了就 reader.cancel()。
+
+    动机: 取原文链接只需要正文页开头一小段。steptian/weread-mp 的实测记录是
+    og:url 在 ~17KB 偏移(其余: picture_page_info_list ~225KB, 正文 ~557KB),
+    而整页约 3.5MB。默认读 96KB 留足余量。
+
+    用途: 判断微信的 -2014(请求频率过高)是按"请求数"还是"字节数"计 —— 若按字节,
+    这个模式能把每篇的流量砍到 1/36 而请求数不变。
+    """
+    rid_lit = json.dumps(review_id)  # JS 字符串字面量(引号/转义安全)
+    return (
+        "(()=>fetch('/web/mp/content?reviewId='+encodeURIComponent(" + rid_lit + "),"
+        "{credentials:'include'}).then(r=>{"
+        "if(!r.body)return JSON.stringify({err:'no_body_stream'});"
+        "var rd=r.body.getReader(),dec=new TextDecoder('utf-8'),t='',total=0;"
+        "function pump(){return rd.read().then(res=>{"
+        "if(res.done)return t;"
+        "total+=res.value.length;"
+        "t+=dec.decode(res.value,{stream:true});"
+        "if(total>=" + str(int(limit)) + "){try{rd.cancel()}catch(e){}return t;}"
+        "return pump();});}"
+        "return pump().then(t=>{"
+        # " = 双引号; 用 \x22 让 JS 正则里的字符类只认 ["'] 两种引号, 避开 Python 转义
+        "var og=t.match(/property=[\x22']og:url[\x22'][^>]*content=[\x22']([^\x22']+)[\x22']/i)"
+        "||t.match(/content=[\x22']([^\x22']+)[\x22'][^>]*property=[\x22']og:url[\x22']/i);"
+        "var ot=t.match(/property=[\x22']og:title[\x22'][^>]*content=[\x22']([^\x22']*)[\x22']/i)"
+        "||t.match(/content=[\x22']([^\x22']*)[\x22'][^>]*property=[\x22']og:title[\x22']/i);"
+        "var im=t.match(/property=[\x22']og:image[\x22'][^>]*content=[\x22']([^\x22']+)[\x22']/i)"
+        "||t.match(/content=[\x22']([^\x22']+)[\x22'][^>]*property=[\x22']og:image[\x22']/i);"
+        "var ct=(t.match(/createTime\\s*=\\s*'([^']*)'/)||[])[1]||'';"
+        # 个别正文页没有 og:url(转载/分享样式), 退回经典页里的 msg_link 变量
+        "var ml=(t.match(/msg_link\\s*=\\s*[\x22']([^\x22']+)[\x22']/)||[])[1]||'';"
+        "return JSON.stringify({bytes:total,link:(og?og[1]:(ml||''))||'',"
+        "title:ot?ot[1]:'',image:im?im[1]:'',createTime:ct});"
+        "});}).catch(e=>JSON.stringify({err:String(e)})))()"
+    )
+
+
+# 是否用"只读前 N 字节"的方式取链接(0 = 关闭, 一律全量读取)。
+# 96KB 是 steptian/weread-mp 给"只要链接"场景的值(og:url 在 ~17KB 处)。
+HEAD_BYTES = int(os.environ.get("WEREAD_HEAD_BYTES", "98304") or 0)
+
+
+def fetch_article_head(reader_url: str, review_id: str, cookie: str = "") -> dict:
+    """只读正文页前 HEAD_BYTES 字节, 取回链接/标题/封面/发布时间(不含正文文本)。
+
+    与 fetch_article_content 相同的返回结构, 但 content 恒为空、content_len=0,
+    并额外带 head_bytes=True 表示"这是省流模式"。
+    """
+    if not review_id or HEAD_BYTES <= 0:
+        return {"link": "", "title": "", "content": "", "create_time": "",
+                "cover": "", "content_len": 0, "head_bytes": False}
+    d = _run_page_js(cookie, _content_head_js(review_id, HEAD_BYTES), "content-head",
+                     reader_url or "https://weread.qq.com/")
+    if d.get("err"):
+        logger.warning("content-head 失败 rid=%s: %s", review_id[:40], str(d.get("err"))[:120])
+    return {
+        "link": (d.get("link") or "").strip(),
+        "title": (d.get("title") or "").strip(),
+        "content": "",
+        "create_time": (d.get("createTime") or "").strip(),
+        "cover": (d.get("image") or "").strip(),
+        "content_len": 0,
+        "head_bytes": True,
+        "bytes_read": int(d.get("bytes") or 0),
+    }
+
+
 def fetch_article_content(reader_url: str, review_id: str, cookie: str = "") -> dict:
     """调 /web/mp/content 拿单篇正文页 → {"link","title","content","create_time","cover"}.
 
