@@ -130,8 +130,13 @@ def _antibot_wait(tag: str, hint: str) -> None:
         if sys.stdin.isatty():
             input()
             return
-    except (EOFError, KeyboardInterrupt):
+    except KeyboardInterrupt:
         raise
+    except EOFError:
+        # stdin 自称终端却读不到输入(后台作业/重定向/cmd 的 *> 重定向下 stdin 会被关掉)。
+        # 2026-10-17 实测: 后台跑抓取时这里抛 EOFError, 整轮直接崩, 一个号都没扫。
+        # 按非交互处理, 退避后继续 —— 反爬闸门不该让无人值守的任务崩溃。
+        logger.warning("stdin 看似终端但读不到输入(EOF), 按非交互处理")
     except Exception:
         pass
     logger.info("非交互环境(stdin 非终端), 退避 %.0fs 后继续", NON_INTERACTIVE_BACKOFF)
