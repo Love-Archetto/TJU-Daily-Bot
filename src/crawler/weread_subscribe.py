@@ -220,7 +220,11 @@ def fetch_articles(cookie: str, book_id: str, reader_url: str = "",
           ".then(r=>r.json()).then(o=>JSON.stringify({errCode:o.errCode,errMsg:o.errMsg||'',"
           "items:(o.reviews||[]).map(g=>(g.subReviews||[]).map(s=>{var mi=(s.review&&s.review.mpInfo)||{};"
           "return {t:mi.title,rid:(s.review&&s.review.reviewId)||'',"
-          "ct:s.review?Number(s.review.createTime||0):0}})).flat(),"
+          "ct:s.review?Number(s.review.createTime||0):0,"
+          # 列表自带的四件套: 封面图 pic_url / 微信自动摘要 content / 阅读数 / 点赞数。
+          # 有它们, Part 3 那种"不抓正文"的条目也能有封面和摘要。
+          "pic:mi.pic_url||'',dig:mi.content||'',"
+          "read:Number(mi.readNum||0),like:Number(mi.likeNum||0)}})).flat(),"
           "n:(o.reviews||[]).length}))"
           ".catch(e=>JSON.stringify({err:String(e)})))()")
     page_url = reader_url or "https://weread.qq.com/"
@@ -429,9 +433,13 @@ def _consume_one(entry: dict, reader_url: str, seen: set[str],
         "publish_time": info.get("create_time") or it.get("date", ""),
         "createTime": it.get("date", ""),
         "source": sub.get("name"),
-        "summary": "",
+        # 摘要直接用微信自带的那句(mpInfo.content): 它是微信从正文里抽的, 质量够用、零成本,
+        # 而且列表阶段就拿到了 —— 这样不抓正文的条目(Part 3 / 省流模式)也能有摘要。
+        "summary": (it.get("dig") or "").strip(),
         "content": info.get("content", ""),
-        "image": info.get("cover", ""),
+        "image": info.get("cover") or it.get("pic") or "",
+        "read_num": int(it.get("read") or 0),
+        "like_num": int(it.get("like") or 0),
     })
     return True
 

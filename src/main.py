@@ -317,8 +317,12 @@ def _ai_rank_and_summarize(
     except Exception as e:
         logger.warning("AI 摘要/推荐失败, 回退规则式: %s", e)
 
-    # 写回摘要(所有文章)
+    # 写回摘要: 只补**缺失**的。
+    # 公众号文章在抓取时已带上微信自带摘要(mpInfo.content), 直接沿用 —— 零成本, 且
+    # Part 3 这类不给 AI 摘要的条目也能有摘要。网站文章没有摘要来源, 才用 AI 生成的。
     for i, a in enumerate(all_articles):
+        if a.get("summary"):
+            continue
         if i in summaries and summaries[i]:
             a["summary"] = summaries[i]
 
@@ -417,6 +421,8 @@ def generate_report(
         for i, article in enumerate(part3, 1):
             lines.append(f"{i}. **{article.get('title', '无标题')}** — [{article.get('link', '#')}]({article.get('link', '#')})")
             lines.append(f"   - 来源: {article.get('source', '未知')} | 时间: {article.get('publish_time', '未知')}")
+            if article.get("summary"):
+                lines.append(f"   - 摘要: {article['summary']}")
             lines.append("")
     else:
         lines.append("> 本日无其余信息。")
