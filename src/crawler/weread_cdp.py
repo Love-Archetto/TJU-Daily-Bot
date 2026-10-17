@@ -150,6 +150,43 @@ def _tab_is_reader_ready(title: str, url: str) -> bool:
     return False
 
 
+def keepalive(port: int | None = None, timeout: int = 30) -> bool:
+    """会话保活: 在同一浏览器上下文里新开一个标签页访问微信读书首页, 让浏览器续 wr_skey。
+
+    为什么另开标签页而不是刷新阅读器页: 阅读器页是 /web/mp/articles 的必需请求上下文
+    (不在其上发会返回 -2041), 刷新它有掉上下文的风险; 而 cookie 在 context 内共享,
+    新标签页访问首页同样能触发会话续期。
+
+    为什么需要: wr_skey 寿命约 90 分钟(GitHub spirodelazz/weread-keepalive 的实战记录),
+    一轮抓取超过这个时长, 后半段就会开始吃 -2012「登录超时」。
+
+    Returns:
+        True = 已执行一次首页访问; False = 连不上/访问失败(不抛异常, 不影响主流程)。
+    """
+    dbg = find_or_launch_edge(port)
+    from playwright.sync_api import sync_playwright
+    page = None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.connect_over_cdp(dbg)
+            try:
+                page = browser.contexts[0].new_page()
+                page.goto("https://weread.qq.com/", wait_until="domcontentloaded",
+                          timeout=timeout * 1000)
+                page.wait_for_timeout(1500)   # 给页面的会话续期请求留点时间
+                return True
+            finally:
+                if page is not None:
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+                browser.close()
+    except Exception as e:
+        logger.warning("会话保活失败(不影响主流程): %s", str(e)[:120])
+        return False
+
+
 @contextlib.contextmanager
 def connect(port: int | None = None):
     """context manager: 连到调试 Edge, 产出一个已就绪的 reader 页面对象.

@@ -123,6 +123,40 @@ def _sleep_interval():
     time.sleep(wait)
 
 
+# 会话保活间隔(秒): wr_skey 寿命约 90 分钟, 长轮次里每隔这么久访问一次微信读书首页,
+# 让浏览器把会话续上。0 = 关闭。15 分钟对齐 GitHub spirodelazz/weread-keepalive 的
+# WEREAD_DAEMON_REFRESH_SECONDS 默认值。
+KEEPALIVE_SECONDS = _env_float("WEREAD_KEEPALIVE_SECONDS", 900.0)
+_last_keepalive = 0.0   # 上次保活的 monotonic 时间; 0 = 尚未开始计时
+
+
+def _maybe_keepalive() -> None:
+    """距上次保活超过 KEEPALIVE_SECONDS 就访问一次微信读书首页。
+
+    为什么需要: wr_skey 约 90 分钟过期, 过期后接口回 -2012「登录超时」, 再恶化成
+    -2010「用户不存在」。一轮 92 个号的抓取如果拖长, 后半段就会开始报错。
+    实现用"另开临时标签页访问首页", 不动阅读器页(它是 articles 的必需上下文)。
+    """
+    global _last_keepalive
+    if KEEPALIVE_SECONDS <= 0:
+        return
+    now = time.monotonic()
+    if _last_keepalive <= 0.0:
+        _last_keepalive = now   # 刚开始抓取, 不需要立刻保活, 只记起点
+        return
+    if now - _last_keepalive < KEEPALIVE_SECONDS:
+        return
+    _last_keepalive = now
+    logger.info("会话保活: 已超过 %.0f 分钟, 访问一次微信读书首页续期 wr_skey",
+                KEEPALIVE_SECONDS / 60)
+    try:
+        from . import weread_cdp
+        if weread_cdp.keepalive():
+            logger.info("会话保活完成")
+    except Exception as e:
+        logger.warning("会话保活异常(忽略, 不影响抓取): %s", str(e)[:120])
+
+
 def _antibot_wait(tag: str, hint: str) -> None:
     """反爬闸门: 提示用户在真实 Edge/网页里刷新并完成验证, 回终端按回车后继续.
 
@@ -539,6 +573,7 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
         book_id = sub.get("bookId", "")
         if not book_id:
             continue
+        _maybe_keepalive()   # 长轮次里定期续 wr_skey, 见 KEEPALIVE_SECONDS
         logger.info("== 抓取订阅号[%s] %s ==", sub.get("name"), book_id)
         item_list = fetch_articles("", book_id, reader_url)
         _sleep_interval()
@@ -622,6 +657,7 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
         logger.warning("本轮正文限额 %d 篇, 顺延 %d 篇到下一轮(仍在回溯窗口内, 会重新成为候选)",
                        CONTENT_MAX_PER_RUN, deferred)
     for entry in todo_content:
+        _maybe_keepalive()   # 取链阶段同样可能拖长
         if not _consume_one(entry, reader_url, seen, articles):
             # 不当场丢弃: 保留条目与位置, 轮末统一重试(见下方轮末重试)
             pending.append(entry)
