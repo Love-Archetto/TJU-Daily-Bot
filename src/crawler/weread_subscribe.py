@@ -64,6 +64,13 @@ MAX_ACCOUNTS = int(os.environ.get("WEREAD_MAX_ACCOUNTS", "0") or 0)
 RATE_LIMIT_CODES = (-2014,)
 SESSION_DEAD_CODES = (-2010, -2012, -2013)
 
+# 每轮最多抓多少篇正文(/web/mp/content, 每篇 ~3.5MB)。列表(/web/mp/articles, 每号几 KB)
+# 不限额, 保证 92 个号一定扫得完 —— 这是"覆盖全部公众号"的底线。真正触发 -2014 限流和
+# -2041 验证码的是正文请求的累积量: 2026-10-17 那轮就是抓了 37 篇正文后, 第 27 个号的
+# 列表请求开始被限流。超出上限的候选不进 seen, 下一轮仍在回溯窗口内 → 会被重新列为候选,
+# 多跑几轮自然补齐(与 dxawdc/wechat-article-collector 的"逐轮补全"同思路)。
+CONTENT_MAX_PER_RUN = int(os.environ.get("WEREAD_CONTENT_MAX_PER_RUN", "30") or 0)
+
 # 同一个"会话失效类"错误码连续出现多少次 -> 判定会话已废, 提前中止本轮。
 # 只统计 SESSION_DEAD_CODES: 限流会自愈, 不该触发中止
 # (2026-10-17 那次就是被连续的 -2014 误判成"会话已失效"而中止的)。
@@ -425,6 +432,8 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
     same_err: int | None = None   # 上一个号的错误码(用于判"同一错误连续出现")
     same_err_hits = 0
     aborted = False
+    # 第一阶段只列列表, 候选正文留到第二阶段限额抓取(见下方"第二阶段")
+    candidates: list[dict] = []
     for sub in subs:
         book_id = sub.get("bookId", "")
         if not book_id:
@@ -482,6 +491,7 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
         todo = item_list[:MAX_ITEMS_PER_SOURCE] if MAX_ITEMS_PER_SOURCE else item_list
         cutoff = (datetime.now() - timedelta(days=LOOKBACK_DAYS)) if LOOKBACK_DAYS > 0 else None
         skipped_old = 0
+        new_here = 0
         for it in todo:
             rid = it.get("rid", "")
             if not rid:
@@ -491,13 +501,29 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
                 if d is not None and d < cutoff:
                     skipped_old += 1
                     continue  # 超出回溯窗口: 不抓正文(省下 ~3.5MB/篇 的请求)
-            entry = {"sub": sub, "item": it}
-            if not _consume_one(entry, reader_url, seen, articles):
-                # 不当场丢弃: 保留条目与位置, 轮末统一重试(见下方轮末重试)
-                pending.append(entry)
+            candidates.append({"sub": sub, "item": it})
+            new_here += 1
+        if new_here:
+            logger.info("  [%s] 窗口内候选 %d 篇", sub.get("name"), new_here)
         if skipped_old:
             logger.info("  [%s] 超出回溯窗口(%s 天)跳过 %d 篇(列表共 %d 篇)",
                         sub.get("name"), LOOKBACK_DAYS, skipped_old, len(todo))
+
+    # ===== 第二阶段: 抓正文(限额) =====
+    # 第一阶段每个号只发一个几 KB 的 /web/mp/articles, 所以 92 个号一定能扫完 ——
+    # 这是"覆盖全部公众号"的底线。正文 /web/mp/content 每篇 ~3.5MB, 才是限流和
+    # 验证码的来源, 因此单独限额; 超出的候选没进 seen, 下一轮仍在窗口内 → 自然补上。
+    logger.info("列表阶段完成: %d 个号, 窗口内候选 %d 篇; 本轮正文上限 %d 篇",
+                len(subs), len(candidates), CONTENT_MAX_PER_RUN)
+    todo_content = candidates[:CONTENT_MAX_PER_RUN] if CONTENT_MAX_PER_RUN else candidates
+    deferred = len(candidates) - len(todo_content)
+    if deferred > 0:
+        logger.warning("本轮正文限额 %d 篇, 顺延 %d 篇到下一轮(仍在回溯窗口内, 会重新成为候选)",
+                       CONTENT_MAX_PER_RUN, deferred)
+    for entry in todo_content:
+        if not _consume_one(entry, reader_url, seen, articles):
+            # 不当场丢弃: 保留条目与位置, 轮末统一重试(见下方轮末重试)
+            pending.append(entry)
     logger.info("订阅公众号抓取: %d 篇来自 %d 个订阅号", len(articles), len(subs))
 
     # 已判定会话失效/持续限流: 重试没有意义(报错来自账号层面, 不是单篇抽取失败), 直接跳过
