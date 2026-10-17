@@ -418,6 +418,8 @@ def generate_report(
     ])
 
     if part3:
+        # Part 3 的定位是"快速扫一眼有哪些没被选中的信息", 所以刻意**不渲染封面图**:
+        # 每条都带一张图会把篇幅撑爆, 反而失去速览的意义。摘要是文字, 保留。
         for i, article in enumerate(part3, 1):
             lines.append(f"{i}. **{article.get('title', '无标题')}** — [{article.get('link', '#')}]({article.get('link', '#')})")
             lines.append(f"   - 来源: {article.get('source', '未知')} | 时间: {article.get('publish_time', '未知')}")
