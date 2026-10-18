@@ -157,6 +157,25 @@ def _maybe_keepalive() -> None:
         logger.warning("会话保活异常(忽略, 不影响抓取): %s", str(e)[:120])
 
 
+# 列表阶段专用间隔(秒)。比取链阶段慢得多, 因为 2026-10-18 实测:
+#   30 次 /web/mp/articles 请求(约 3 分钟) 就撞 -2014;
+#   而 80 次 /web/mp/content 首块读取(约 8 分钟, 10.9MB) 一次都没报错。
+# 说明列表接口的限额比正文接口严格得多 —— 它才是 92 个号跑不完的真瓶颈。
+LIST_INTERVAL = _env_float("WEREAD_LIST_INTERVAL", 8.0)
+
+# 连续多少个号"退避后仍被限流"才认定整轮跑不动(之前是 1 个就中止, 覆盖面太差)。
+RATE_HIT_ABORT = int(os.environ.get("WEREAD_RATE_ABORT", "5") or 5)
+
+
+def _sleep_list_interval() -> None:
+    """列表请求之间的间隔(带抖动)。FAST_TEST=1 时跳过。"""
+    if os.environ.get("FAST_TEST", "") in ("1", "true"):
+        return
+    wait = random.uniform(LIST_INTERVAL * 0.8, LIST_INTERVAL * 1.2)
+    logger.info("列表间隔 %.1fs", wait)
+    time.sleep(wait)
+
+
 def _antibot_wait(tag: str, hint: str) -> None:
     """反爬闸门: 提示用户在真实 Edge/网页里刷新并完成验证, 回终端按回车后继续.
 
@@ -569,14 +588,19 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
     aborted = False
     # 第一阶段只列列表, 候选正文留到第二阶段限额抓取(见下方"第二阶段")
     candidates: list[dict] = []
+    processed = 0                 # 实际扫过的号数(用于给用户准确的完成度)
+    skipped: list[str] = []       # 退避后仍被限流而跳过的号
+    rate_hit_streak = 0           # 连续多少个号被限流
     for sub in subs:
         book_id = sub.get("bookId", "")
         if not book_id:
             continue
+        processed += 1
         _maybe_keepalive()   # 长轮次里定期续 wr_skey, 见 KEEPALIVE_SECONDS
-        logger.info("== 抓取订阅号[%s] %s ==", sub.get("name"), book_id)
+        logger.info("== 抓取订阅号[%d/%d %s] %s ==", processed, len(subs),
+                    sub.get("name"), book_id)
         item_list = fetch_articles("", book_id, reader_url)
-        _sleep_interval()
+        _sleep_list_interval()
 
         # 限流(-2014): 退避后重抓该号。这是频率问题, 会话本身没坏, 不能算作"会话失效"。
         if not item_list and _LAST_ARTICLES_ERR in RATE_LIMIT_CODES:
@@ -587,17 +611,25 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
                                attempt, RATE_LIMIT_TRIES)
                 time.sleep(wait)
                 item_list = fetch_articles("", book_id, reader_url)
-                _sleep_interval()
+                _sleep_list_interval()
                 if item_list or _LAST_ARTICLES_ERR not in RATE_LIMIT_CODES:
                     break
             if not item_list and _LAST_ARTICLES_ERR in RATE_LIMIT_CODES:
-                logger.error(
-                    "退避重试 %d 次后仍被限流(errCode=-2014 请求频率过高) —— 本轮抓取到此为止, "
-                    "已抓 %d 篇。这是频率问题, 登录态没坏; 隔 10 分钟以上重跑即可, 无需重新扫码。",
-                    RATE_LIMIT_TRIES, len(articles),
-                )
-                aborted = True
-                break
+                # 覆盖优先: 跳过这个号继续扫后面的, 而不是整轮中止。
+                # 旧行为"1 个号失败就中止"让 92 个号只扫到 30 个(2026-10-18 实测)。
+                rate_hit_streak += 1
+                skipped.append(sub.get("name") or book_id)
+                logger.warning("该号退避 %d 次后仍被限流(-2014), 跳过它继续扫后面的号 "
+                               "(累计跳过 %d 个)", RATE_LIMIT_TRIES, len(skipped))
+                if rate_hit_streak >= RATE_HIT_ABORT:
+                    logger.error(
+                        "连续 %d 个号退避后都被限流 —— 本轮确实跑不动了, 中止。",
+                        rate_hit_streak,
+                    )
+                    aborted = True
+                    break
+                continue
+            rate_hit_streak = 0   # 限流恢复, 连续计数清零
 
         if not item_list:
             # 只对"会话失效类"错误码计数: 见 SESSION_DEAD_CODES 注释
@@ -649,8 +681,10 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
     # 第一阶段每个号只发一个几 KB 的 /web/mp/articles, 所以 92 个号一定能扫完 ——
     # 这是"覆盖全部公众号"的底线。第二阶段每篇只读正文页第一块(~36KB)拿 og:url,
     # 不再全量读正文(3.5MB); 超出的候选没进 seen, 下一轮仍在窗口内 → 自然补上。
-    logger.info("列表阶段完成: %d 个号, 窗口内候选 %d 篇; 本轮正文上限 %d 篇",
-                len(subs), len(candidates), CONTENT_MAX_PER_RUN)
+    logger.info("列表阶段完成: 实际扫了 %d/%d 个号%s, 窗口内候选 %d 篇; 本轮取链上限 %d 篇",
+                processed, len(subs),
+                (f"(限流跳过 {len(skipped)} 个)" if skipped else ""),
+                len(candidates), CONTENT_MAX_PER_RUN)
     todo_content = candidates[:CONTENT_MAX_PER_RUN] if CONTENT_MAX_PER_RUN else candidates
     deferred = len(candidates) - len(todo_content)
     if deferred > 0:
@@ -661,7 +695,9 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
         if not _consume_one(entry, reader_url, seen, articles):
             # 不当场丢弃: 保留条目与位置, 轮末统一重试(见下方轮末重试)
             pending.append(entry)
-    logger.info("订阅公众号抓取: %d 篇来自 %d 个订阅号", len(articles), len(subs))
+    logger.info("订阅公众号抓取: %d 篇来自 %d 个订阅号(本轮实扫 %d/%d 个号)",
+                len(articles), len({a.get("source") for a in articles}),
+                processed, len(subs))
 
     # 已判定会话失效/持续限流: 重试没有意义(报错来自账号层面, 不是单篇抽取失败), 直接跳过
     if aborted:
