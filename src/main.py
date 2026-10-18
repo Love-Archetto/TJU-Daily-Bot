@@ -927,7 +927,12 @@ def main() -> int:
     gzh_sources = [x for x in sources if x.get("type") == "wechat_rss"]
     if gzh_sources:
         # 本地/本地仿真可传 account_names；默认从 sources.yaml 读公众号名
-        wechat_articles, inactive_gzh = fetch_wechat_articles(seen_links=seen_links)
+        # gzh_last_update: {bookId: 该号最新一篇的发布时间戳}。用它做增量判断 ——
+        # 上次运行后书架里没有变化的号, 本轮连列表请求都不发(列表接口按请求次数限额)。
+        # 传的是 state 里的同一个 dict, 函数会原地更新, 由既有 save_state 统一落盘。
+        gzh_last_update = state.setdefault("gzh_last_update", {})
+        wechat_articles, inactive_gzh = fetch_wechat_articles(
+            seen_links=seen_links, gzh_last_update=gzh_last_update)
         all_articles.extend(wechat_articles)
         fetch_summary["wechat_total"] = len(wechat_articles)
         # 处理失效公众号: 记录到 deprecated_accounts.yaml + 从 sources.yaml 真删

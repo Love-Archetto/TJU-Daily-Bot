@@ -177,7 +177,9 @@ def _maybe_alert_cookie_expired(book_id: str, status: int, detail: str) -> None:
 
 
 def fetch_wechat_articles(account_names: list[str] | None = None,
-                          seen_links: set[str] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+                          seen_links: set[str] | None = None,
+                          gzh_last_update: dict[str, int] | None = None,
+                          ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """抓取公众号 — 复用真实 Edge(CDP) + /web/mp/articles + /web/mp/content.
 
     取代旧 cover(/api/mp/cover)方案与 headless+cookie 方案。仅追踪微信读书里"已订阅"的公众号。
@@ -187,6 +189,9 @@ def fetch_wechat_articles(account_names: list[str] | None = None,
     Args:
         account_names: 保留兼容, 未使用。
         seen_links: 已收录链接集合; 命中的文章不再产出(链接须抓完 content 才知道, 故请求仍会发出)。
+        gzh_last_update: {bookId: 该号最新一篇的发布时间戳}, **由本函数原地更新**。
+            用于增量判断: 上次记录值与本次书架里的 lastChapterCreateTime 相同, 说明该号
+            自上次运行以来没有新文章, 连列表请求都不发(列表接口按请求次数限额)。
 
     Returns:
         (articles, inactive)
@@ -195,7 +200,7 @@ def fetch_wechat_articles(account_names: list[str] | None = None,
     """
     from .weread_subscribe import fetch_subscribed_articles
     # CDP 复用真实 Edge 会话; Edge 未起/未登录时 fetch_subscribed_articles 内部会友好提示并返回空。
-    return fetch_subscribed_articles(seen_links=seen_links)
+    return fetch_subscribed_articles(seen_links=seen_links, gzh_last_update=gzh_last_update)
 
 
 def _fetch_article_create_time(link: str) -> str:

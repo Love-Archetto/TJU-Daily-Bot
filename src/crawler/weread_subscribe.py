@@ -546,7 +546,9 @@ def _ask_continue_retry(count: int) -> bool:
     return ans in ("y", "yes", "是")
 
 
-def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = None) -> tuple[list[dict], list[dict]]:
+def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = None,
+                             gzh_last_update: dict[str, int] | None = None,
+                             ) -> tuple[list[dict], list[dict]]:
     """主入口: 书架订阅号 → articles列表 → 逐篇 content(链接/正文/时间/封面). 返回 (articles, inactive).
 
     复用真实 Edge(CDP)。每篇先调 /web/mp/content 取规范原文链接(全格式), 再按链接去重:
@@ -599,6 +601,7 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
     skipped: list[str] = []       # 退避后仍被限流而跳过的号
     rate_hit_streak = 0           # 连续多少个号被限流
     dormant = 0                   # 窗口内不可能有更新、连列表都没发的号
+    unchanged = 0                 # 自上次运行以来没有新文章、免列表请求的号
     # 预筛时间线: 早于 cutoff_ts 说明该号最新一篇都在回溯窗口之外, 不可能有新文章。
     _now = datetime.now()
     cutoff_ts = (_now - timedelta(days=LOOKBACK_DAYS)).timestamp() if LOOKBACK_DAYS > 0 else None
@@ -622,6 +625,14 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
             if cutoff_ts is not None and lct < cutoff_ts:
                 dormant += 1
                 logger.info("  [%s] 最新一篇 %s 早于回溯窗口, 跳过(免列表请求)",
+                            sub.get("name"), lct_date)
+                continue
+            # 增量: 上次运行记过该号的 last_article_ts, 且这次书架里一模一样
+            # -> 它自上次以来没有发过新文章, 一次列表请求都不用发。
+            # 这是"把列表请求数压到配额以下"的关键一步(列表接口按请求次数限额)。
+            if gzh_last_update is not None and gzh_last_update.get(book_id) == lct:
+                unchanged += 1
+                logger.info("  [%s] 自上次运行无新文章(lct=%s), 跳过(免列表请求)",
                             sub.get("name"), lct_date)
                 continue
 
@@ -706,15 +717,19 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
         if skipped_old:
             logger.info("  [%s] 超出回溯窗口(%s 天)跳过 %d 篇(列表共 %d 篇)",
                         sub.get("name"), LOOKBACK_DAYS, skipped_old, len(todo))
+        # 这个号的列表已经成功拿到 -> 记下它当前的最新发布时间, 供下次运行做增量判断。
+        # 只在成功路径记录: 被限流/会话失效跳过的号不写, 下次还会重扫。
+        if gzh_last_update is not None and lct > 0:
+            gzh_last_update[book_id] = lct
 
     # ===== 第二阶段: 取原文链接(省流, 限额) =====
     # 第一阶段每个号只发一个几 KB 的 /web/mp/articles, 所以 92 个号一定能扫完 ——
     # 这是"覆盖全部公众号"的底线。第二阶段每篇只读正文页第一块(~36KB)拿 og:url,
     # 不再全量读正文(3.5MB); 超出的候选没进 seen, 下一轮仍在窗口内 → 自然补上。
-    logger.info("列表阶段完成: 实际扫了 %d/%d 个号(书架预筛免请求 %d 个%s), "
+    logger.info("列表阶段完成: 实际扫了 %d/%d 个号(免列表请求: 增量无更新 %d + 预筛 %d%s), "
                 "窗口内候选 %d 篇; 本轮取链上限 %d 篇",
-                processed, len(subs), dormant,
-                (f", 限流跳过 {len(skipped)} 个" if skipped else ""),
+                processed, len(subs), unchanged, dormant,
+                (f"; 限流跳过 {len(skipped)} 个" if skipped else ""),
                 len(candidates), CONTENT_MAX_PER_RUN)
     todo_content = candidates[:CONTENT_MAX_PER_RUN] if CONTENT_MAX_PER_RUN else candidates
     deferred = len(candidates) - len(todo_content)
