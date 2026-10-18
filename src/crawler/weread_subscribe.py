@@ -234,7 +234,14 @@ def _run_page_js(cookie: str, js: str, tag: str, page_url: str = "https://weread
 
 
 def list_subscribed(cookie: str) -> list[dict]:
-    """书架接口发现已订阅的公众号. 返回 [{"name","bookId","readerUrl"}...].
+    """书架接口发现已订阅的公众号.
+
+    返回 [{"name","bookId","readerUrl","last_article_ts"}...]。
+    last_article_ts 来自书架的 lastChapterCreateTime —— 该号**最新一篇的发布时间**。
+    它让抓取阶段能在发列表请求之前就判断"这个号最近有没有更新", 从而把
+    /web/mp/articles 的请求数从"92 个号"压到"真正有更新的十几个号" ——
+    这是绕开列表接口请求配额的关键(2026-10-18 实测: 30 次列表请求就撞 -2014,
+    而 80 次正文首块读取毫无压力, 说明瓶颈在列表接口的请求次数而非流量)。
 
     readerUrl 由每条 deepLink 的 `v`(微信读书校验 hash, 每号各不相同, 不可自拼)
     拼出: it 是 /web/mp/articles 唯一能用(非 -2041)的发起页上下文, 对齐
@@ -243,7 +250,7 @@ def list_subscribed(cookie: str) -> list[dict]:
     # 与 tools/test_weread_reader.py 验证过的 SHELF 脚本一致(逐字符), 仅把 v 换成 readerUrl
     # (块箭头 map + return: 整串经 node --check 验证括号平衡)
     js = (
-          "(()=>fetch('/web/shelf/sync?synckey=0&teenmode=0&album=1',{credentials:'include'}).then(r=>r.json()).then(o=>JSON.stringify({errCode:o.errCode,books:(o.books||[]).filter(b=>String(b.bookId||'').indexOf('MP_WXS_')===0).map(b=>{var v=(b.deepLink||'').match(/[?&]v=([^&]+)/)?.[1]||null;return {name:b.title,bookId:b.bookId,readerUrl:v?('https://weread.qq.com/web/mp/reader/'+v):null};})})).catch(e=>JSON.stringify({err:String(e)})))()"
+          "(()=>fetch('/web/shelf/sync?synckey=0&teenmode=0&album=1',{credentials:'include'}).then(r=>r.json()).then(o=>JSON.stringify({errCode:o.errCode,books:(o.books||[]).filter(b=>String(b.bookId||'').indexOf('MP_WXS_')===0).map(b=>{var v=(b.deepLink||'').match(/[?&]v=([^&]+)/)?.[1]||null;return {name:b.title,bookId:b.bookId,readerUrl:v?('https://weread.qq.com/web/mp/reader/'+v):null,last_article_ts:Number(b.lastChapterCreateTime||0)};})})).catch(e=>JSON.stringify({err:String(e)})))()"
     )
     d = _run_page_js(cookie, js, "shelf")
     if d.get("errCode"):
@@ -591,10 +598,33 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
     processed = 0                 # 实际扫过的号数(用于给用户准确的完成度)
     skipped: list[str] = []       # 退避后仍被限流而跳过的号
     rate_hit_streak = 0           # 连续多少个号被限流
+    dormant = 0                   # 窗口内不可能有更新、连列表都没发的号
+    # 预筛时间线: 早于 cutoff_ts 说明该号最新一篇都在回溯窗口之外, 不可能有新文章。
+    _now = datetime.now()
+    cutoff_ts = (_now - timedelta(days=LOOKBACK_DAYS)).timestamp() if LOOKBACK_DAYS > 0 else None
+    one_year_ts = (_now - timedelta(days=365)).timestamp()
     for sub in subs:
         book_id = sub.get("bookId", "")
         if not book_id:
             continue
+        # 预筛: 书架已给出该号最新一篇的发布时间。若它早于回溯窗口, 这个号在窗口内
+        # 不可能有新文章 —— 直接跳过, **连列表请求都不发**。
+        # 这是把 /web/mp/articles 请求数压下来的关键(该接口按请求次数限额)。
+        lct = int(sub.get("last_article_ts") or 0)
+        if lct > 0:
+            lct_date = datetime.fromtimestamp(lct, timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+            if lct < one_year_ts:
+                inactive.append({"name": sub.get("name"), "bookId": book_id,
+                                 "last_update": lct_date})
+                logger.warning("订阅号[%s] 1年未更新(%s), 记失效(免列表请求)",
+                               sub.get("name"), lct_date)
+                continue
+            if cutoff_ts is not None and lct < cutoff_ts:
+                dormant += 1
+                logger.info("  [%s] 最新一篇 %s 早于回溯窗口, 跳过(免列表请求)",
+                            sub.get("name"), lct_date)
+                continue
+
         processed += 1
         _maybe_keepalive()   # 长轮次里定期续 wr_skey, 见 KEEPALIVE_SECONDS
         logger.info("== 抓取订阅号[%d/%d %s] %s ==", processed, len(subs),
@@ -681,9 +711,10 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
     # 第一阶段每个号只发一个几 KB 的 /web/mp/articles, 所以 92 个号一定能扫完 ——
     # 这是"覆盖全部公众号"的底线。第二阶段每篇只读正文页第一块(~36KB)拿 og:url,
     # 不再全量读正文(3.5MB); 超出的候选没进 seen, 下一轮仍在窗口内 → 自然补上。
-    logger.info("列表阶段完成: 实际扫了 %d/%d 个号%s, 窗口内候选 %d 篇; 本轮取链上限 %d 篇",
-                processed, len(subs),
-                (f"(限流跳过 {len(skipped)} 个)" if skipped else ""),
+    logger.info("列表阶段完成: 实际扫了 %d/%d 个号(书架预筛免请求 %d 个%s), "
+                "窗口内候选 %d 篇; 本轮取链上限 %d 篇",
+                processed, len(subs), dormant,
+                (f", 限流跳过 {len(skipped)} 个" if skipped else ""),
                 len(candidates), CONTENT_MAX_PER_RUN)
     todo_content = candidates[:CONTENT_MAX_PER_RUN] if CONTENT_MAX_PER_RUN else candidates
     deferred = len(candidates) - len(todo_content)
