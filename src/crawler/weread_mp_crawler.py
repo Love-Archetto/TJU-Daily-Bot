@@ -179,6 +179,7 @@ def _maybe_alert_cookie_expired(book_id: str, status: int, detail: str) -> None:
 def fetch_wechat_articles(account_names: list[str] | None = None,
                           seen_links: set[str] | None = None,
                           gzh_last_update: dict[str, int] | None = None,
+                          gzh_last_list_ok: dict[str, int] | None = None,
                           ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """抓取公众号 — 复用真实 Edge(CDP) + /web/mp/articles + /web/mp/content.
 
@@ -200,7 +201,8 @@ def fetch_wechat_articles(account_names: list[str] | None = None,
     """
     from .weread_subscribe import fetch_subscribed_articles
     # CDP 复用真实 Edge 会话; Edge 未起/未登录时 fetch_subscribed_articles 内部会友好提示并返回空。
-    return fetch_subscribed_articles(seen_links=seen_links, gzh_last_update=gzh_last_update)
+    return fetch_subscribed_articles(seen_links=seen_links, gzh_last_update=gzh_last_update,
+                                     gzh_last_list_ok=gzh_last_list_ok)
 
 
 def _fetch_article_create_time(link: str) -> str:

@@ -931,8 +931,12 @@ def main() -> int:
         # 上次运行后书架里没有变化的号, 本轮连列表请求都不发(列表接口按请求次数限额)。
         # 传的是 state 里的同一个 dict, 函数会原地更新, 由既有 save_state 统一落盘。
         gzh_last_update = state.setdefault("gzh_last_update", {})
+        # gzh_last_list_ok: {bookId: 上次成功抓完整列表的 epoch 秒}。只在成功时更新,
+        # 所以失败过的号时间戳偏旧 -> 下轮自动排到前面优先补抓(不会有号被永久饿死)。
+        gzh_last_list_ok = state.setdefault("gzh_last_list_ok", {})
         wechat_articles, inactive_gzh = fetch_wechat_articles(
-            seen_links=seen_links, gzh_last_update=gzh_last_update)
+            seen_links=seen_links, gzh_last_update=gzh_last_update,
+            gzh_last_list_ok=gzh_last_list_ok)
         all_articles.extend(wechat_articles)
         fetch_summary["wechat_total"] = len(wechat_articles)
         # 处理失效公众号: 记录到 deprecated_accounts.yaml + 从 sources.yaml 真删

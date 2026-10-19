@@ -548,6 +548,7 @@ def _ask_continue_retry(count: int) -> bool:
 
 def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = None,
                              gzh_last_update: dict[str, int] | None = None,
+                             gzh_last_list_ok: dict[str, int] | None = None,
                              ) -> tuple[list[dict], list[dict]]:
     """主入口: 书架订阅号 → articles列表 → 逐篇 content(链接/正文/时间/封面). 返回 (articles, inactive).
 
@@ -597,22 +598,24 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
     aborted = False
     # 第一阶段只列列表, 候选正文留到第二阶段限额抓取(见下方"第二阶段")
     candidates: list[dict] = []
-    processed = 0                 # 实际扫过的号数(用于给用户准确的完成度)
-    skipped: list[str] = []       # 退避后仍被限流而跳过的号
-    rate_hit_streak = 0           # 连续多少个号被限流
-    dormant = 0                   # 窗口内不可能有更新、连列表都没发的号
-    unchanged = 0                 # 自上次运行以来没有新文章、免列表请求的号
-    # 预筛时间线: 早于 cutoff_ts 说明该号最新一篇都在回溯窗口之外, 不可能有新文章。
+    processed = 0                 # 实际发过列表请求的号数
+    skipped: list[str] = []       # 失败被跳过的号(下轮优先补)
+    rate_hit_streak = 0           # 连续多少个号失败
+    dormant = 0                   # 窗口内不可能有更新、免列表请求的号
+    unchanged = 0                 # 自上次运行以来无新文章、免列表请求的号
     _now = datetime.now()
     cutoff_ts = (_now - timedelta(days=LOOKBACK_DAYS)).timestamp() if LOOKBACK_DAYS > 0 else None
     one_year_ts = (_now - timedelta(days=365)).timestamp()
+    last_ok = gzh_last_list_ok if gzh_last_list_ok is not None else {}
+    last_lct = gzh_last_update if gzh_last_update is not None else {}
+
+    # ---- 第一步: 纯本地预筛(零请求), 决定哪些号需要发列表请求 ----
+    # 顺序: 1 年未更新 -> 记失效; 窗口外 -> 跳过; 书架 lct 与上次记录相同 -> 无新文章跳过。
+    todo_subs: list[dict] = []
     for sub in subs:
         book_id = sub.get("bookId", "")
         if not book_id:
             continue
-        # 预筛: 书架已给出该号最新一篇的发布时间。若它早于回溯窗口, 这个号在窗口内
-        # 不可能有新文章 —— 直接跳过, **连列表请求都不发**。
-        # 这是把 /web/mp/articles 请求数压下来的关键(该接口按请求次数限额)。
         lct = int(sub.get("last_article_ts") or 0)
         if lct > 0:
             lct_date = datetime.fromtimestamp(lct, timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
@@ -624,57 +627,50 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
                 continue
             if cutoff_ts is not None and lct < cutoff_ts:
                 dormant += 1
-                logger.info("  [%s] 最新一篇 %s 早于回溯窗口, 跳过(免列表请求)",
-                            sub.get("name"), lct_date)
                 continue
-            # 增量: 上次运行记过该号的 last_article_ts, 且这次书架里一模一样
-            # -> 它自上次以来没有发过新文章, 一次列表请求都不用发。
-            # 这是"把列表请求数压到配额以下"的关键一步(列表接口按请求次数限额)。
-            if gzh_last_update is not None and gzh_last_update.get(book_id) == lct:
+            if last_lct.get(book_id) == lct:
                 unchanged += 1
-                logger.info("  [%s] 自上次运行无新文章(lct=%s), 跳过(免列表请求)",
-                            sub.get("name"), lct_date)
                 continue
+        todo_subs.append(sub)
 
+    # ---- 第二步: 排序 —— "最久没成功抓过完整列表"的号优先 ----
+    # gzh_last_list_ok 只在**成功**时更新, 所以失败过的号时间戳天然偏旧, 会自动排到前面;
+    # 从未成功过的(不在表里)最优先。这样即使配额紧张, 也不会有号被永久饿死。
+    todo_subs.sort(key=lambda s: last_ok.get(s.get("bookId", ""), 0))
+    logger.info("列表阶段待办: %d 个号需要发列表请求(预筛免请求 %d + 无新文章 %d, "
+                "共 %d 个号); 按\"最久未成功抓全\"排序",
+                len(todo_subs), dormant, unchanged, len(subs))
+
+    # ---- 第三步: 逐个抓列表。**任何失败立即跳过, 不重试** ----
+    # 列表接口按请求次数限额, 重试等于额外烧配额, 还会把后面的号一起拖进限流。
+    # 失败的号不更新 gzh_last_list_ok -> 下轮自动排到前面优先补抓。
+    for sub in todo_subs:
+        book_id = sub.get("bookId", "")
+        lct = int(sub.get("last_article_ts") or 0)
         processed += 1
         _maybe_keepalive()   # 长轮次里定期续 wr_skey, 见 KEEPALIVE_SECONDS
-        logger.info("== 抓取订阅号[%d/%d %s] %s ==", processed, len(subs),
+        logger.info("== 抓取订阅号[%d/%d %s] %s ==", processed, len(todo_subs),
                     sub.get("name"), book_id)
         item_list = fetch_articles("", book_id, reader_url)
         _sleep_list_interval()
 
-        # 限流(-2014): 退避后重抓该号。这是频率问题, 会话本身没坏, 不能算作"会话失效"。
-        if not item_list and _LAST_ARTICLES_ERR in RATE_LIMIT_CODES:
-            for attempt in range(1, RATE_LIMIT_TRIES + 1):
-                wait = min(RATE_LIMIT_BACKOFF * (2 ** (attempt - 1)), RATE_LIMIT_MAX_BACKOFF)
-                logger.warning("触发微信读书限流 errCode=%s(%s), 退避 %.0fs 后重抓该号(%d/%d)",
-                               _LAST_ARTICLES_ERR, _LAST_ARTICLES_MSG, wait,
-                               attempt, RATE_LIMIT_TRIES)
-                time.sleep(wait)
-                item_list = fetch_articles("", book_id, reader_url)
-                _sleep_list_interval()
-                if item_list or _LAST_ARTICLES_ERR not in RATE_LIMIT_CODES:
-                    break
-            if not item_list and _LAST_ARTICLES_ERR in RATE_LIMIT_CODES:
-                # 覆盖优先: 跳过这个号继续扫后面的, 而不是整轮中止。
-                # 旧行为"1 个号失败就中止"让 92 个号只扫到 30 个(2026-10-18 实测)。
+        if not item_list:
+            err = _LAST_ARTICLES_ERR
+            if err in RATE_LIMIT_CODES:
+                # 限流: 立即跳过, 不重试。省下的配额留给还没扫的号。
                 rate_hit_streak += 1
                 skipped.append(sub.get("name") or book_id)
-                logger.warning("该号退避 %d 次后仍被限流(-2014), 跳过它继续扫后面的号 "
-                               "(累计跳过 %d 个)", RATE_LIMIT_TRIES, len(skipped))
+                logger.warning("该号被限流 errCode=%s(%s) -> 立即跳过(不重试, 省配额); "
+                               "已标记, 下轮优先补抓(累计跳过 %d 个)",
+                               err, _LAST_ARTICLES_MSG, len(skipped))
                 if rate_hit_streak >= RATE_HIT_ABORT:
-                    logger.error(
-                        "连续 %d 个号退避后都被限流 —— 本轮确实跑不动了, 中止。",
-                        rate_hit_streak,
-                    )
+                    logger.error("连续 %d 个号被限流 —— 配额已耗尽, 中止列表阶段。"
+                                 "已扫 %d 个号, 跳过 %d 个(下轮优先补抓)。",
+                                 rate_hit_streak, processed, len(skipped))
                     aborted = True
                     break
                 continue
-            rate_hit_streak = 0   # 限流恢复, 连续计数清零
-
-        if not item_list:
-            # 只对"会话失效类"错误码计数: 见 SESSION_DEAD_CODES 注释
-            err = _LAST_ARTICLES_ERR
+            # 会话失效类: 连续出现说明登录态废了, 本轮没意义
             if err in SESSION_DEAD_CODES and SAME_ERR_ABORT > 0:
                 if err == same_err:
                     same_err_hits += 1
@@ -688,8 +684,11 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
                     )
                     aborted = True
                     break
+            skipped.append(sub.get("name") or book_id)
             continue
-        same_err, same_err_hits = None, 0   # 成功一次即清零
+        rate_hit_streak = 0   # 成功即清零
+        same_err, same_err_hits = None, 0
+
         # 判定 1 年未更新: 用最新一篇 createTime
         latest_ct = item_list[0].get("date", "")
         if latest_ct and _is_one_year_stale(latest_ct):
@@ -709,7 +708,7 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
                 d = _list_date(it.get("date", ""))
                 if d is not None and d < cutoff:
                     skipped_old += 1
-                    continue  # 超出回溯窗口: 不抓正文(省下 ~3.5MB/篇 的请求)
+                    continue  # 超出回溯窗口: 不抓正文
             candidates.append({"sub": sub, "item": it})
             new_here += 1
         if new_here:
@@ -717,19 +716,21 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
         if skipped_old:
             logger.info("  [%s] 超出回溯窗口(%s 天)跳过 %d 篇(列表共 %d 篇)",
                         sub.get("name"), LOOKBACK_DAYS, skipped_old, len(todo))
-        # 这个号的列表已经成功拿到 -> 记下它当前的最新发布时间, 供下次运行做增量判断。
-        # 只在成功路径记录: 被限流/会话失效跳过的号不写, 下次还会重扫。
-        if gzh_last_update is not None and lct > 0:
-            gzh_last_update[book_id] = lct
+        # 成功抓到完整列表 -> 记下"什么时候抓成功的"和"当时的最新文章时间"。
+        # 只有成功路径更新: 失败的号时间戳保持旧值, 下轮自动优先补抓。
+        last_ok[book_id] = int(time.time())
+        if lct > 0:
+            last_lct[book_id] = lct
+
 
     # ===== 第二阶段: 取原文链接(省流, 限额) =====
     # 第一阶段每个号只发一个几 KB 的 /web/mp/articles, 所以 92 个号一定能扫完 ——
     # 这是"覆盖全部公众号"的底线。第二阶段每篇只读正文页第一块(~36KB)拿 og:url,
     # 不再全量读正文(3.5MB); 超出的候选没进 seen, 下一轮仍在窗口内 → 自然补上。
-    logger.info("列表阶段完成: 实际扫了 %d/%d 个号(免列表请求: 增量无更新 %d + 预筛 %d%s), "
-                "窗口内候选 %d 篇; 本轮取链上限 %d 篇",
-                processed, len(subs), unchanged, dormant,
-                (f"; 限流跳过 {len(skipped)} 个" if skipped else ""),
+    logger.info("列表阶段完成: 发列表请求 %d 次 / 书架 %d 个号(预筛免请求 %d + 无新文章 %d"
+                "%s); 窗口内候选 %d 篇; 本轮取链上限 %d 篇",
+                processed, len(subs), dormant, unchanged,
+                (f" + 失败跳过 {len(skipped)}" if skipped else ""),
                 len(candidates), CONTENT_MAX_PER_RUN)
     todo_content = candidates[:CONTENT_MAX_PER_RUN] if CONTENT_MAX_PER_RUN else candidates
     deferred = len(candidates) - len(todo_content)
