@@ -166,6 +166,25 @@ LIST_INTERVAL = _env_float("WEREAD_LIST_INTERVAL", 8.0)
 # 连续多少个号"退避后仍被限流"才认定整轮跑不动(之前是 1 个就中止, 覆盖面太差)。
 RATE_HIT_ABORT = int(os.environ.get("WEREAD_RATE_ABORT", "5") or 5)
 
+# ===== 每轮请求预算(单位) =====
+# 从 2026-10-16 ~ 10-19 五次真实运行反推出来的配额模型:
+#   10-18 15:08  纯列表 30 次                -> 第 30 次撞 -2014
+#   10-19 11:12  列表 30 + 正文首块 1 次     -> 第 31 次撞
+#   10-17 21:36  列表 27 + 正文全量 37 次    -> 第 64 次撞
+#   10-18 压测   正文首块 80 次              -> 完全不撞
+# 只有"列表 1.0 + 正文 0.1, 总预算 30"这个模型能同时解释四组数据
+#   (30            = 30 ✓)
+#   (30 + 1x0.1    = 30.1 ✓)
+#   (27 + 37x0.1   = 30.7 ✓)
+#   (80x0.1        = 8 ✓)
+# 配额窗口长度未知: 2026-10-19 13:16 撞墙, 到 18:20(5 小时)仍未恢复,
+# 所以按"每轮"预算, 而不是"每分钟"。默认 25 单位留 5 单位余量,
+# 避免打穿配额导致后续几天都瘸腿。用完就停, 没扫到的号由 gzh_last_list_ok
+# 的优先级在下一轮自动补上。
+LIST_BUDGET = _env_float("WEREAD_LIST_BUDGET", 25.0)
+BUDGET_COST_LIST = _env_float("WEREAD_BUDGET_COST_LIST", 1.0)
+BUDGET_COST_CONTENT = _env_float("WEREAD_BUDGET_COST_CONTENT", 0.1)
+
 
 def _sleep_list_interval() -> None:
     """列表请求之间的间隔(带抖动)。FAST_TEST=1 时跳过。"""
@@ -644,9 +663,18 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
     # ---- 第三步: 逐个抓列表。**任何失败立即跳过, 不重试** ----
     # 列表接口按请求次数限额, 重试等于额外烧配额, 还会把后面的号一起拖进限流。
     # 失败的号不更新 gzh_last_list_ok -> 下轮自动排到前面优先补抓。
+    budget_left = LIST_BUDGET      # 本轮剩余预算(单位), 见 LIST_BUDGET 注释
+    budget_stop = False            # 预算/限流导致提前收手
     for sub in todo_subs:
         book_id = sub.get("bookId", "")
         lct = int(sub.get("last_article_ts") or 0)
+        # 预算闸门: 打穿配额会让后续几天都瘸腿, 所以宁可停下让下一轮补。
+        if budget_left < BUDGET_COST_LIST:
+            logger.warning("本轮请求预算已用完(%.1f 单位) —— 剩余 %d 个号留到下轮优先补抓",
+                           LIST_BUDGET, len(todo_subs) - processed)
+            budget_stop = True
+            break
+        budget_left -= BUDGET_COST_LIST
         processed += 1
         _maybe_keepalive()   # 长轮次里定期续 wr_skey, 见 KEEPALIVE_SECONDS
         logger.info("== 抓取订阅号[%d/%d %s] %s ==", processed, len(todo_subs),
@@ -668,6 +696,7 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
                                  "已扫 %d 个号, 跳过 %d 个(下轮优先补抓)。",
                                  rate_hit_streak, processed, len(skipped))
                     aborted = True
+                    budget_stop = True
                     break
                 continue
             # 会话失效类: 连续出现说明登录态废了, 本轮没意义
@@ -728,16 +757,24 @@ def fetch_subscribed_articles(cookie: str = "", seen_links: set[str] | None = No
     # 这是"覆盖全部公众号"的底线。第二阶段每篇只读正文页第一块(~36KB)拿 og:url,
     # 不再全量读正文(3.5MB); 超出的候选没进 seen, 下一轮仍在窗口内 → 自然补上。
     logger.info("列表阶段完成: 发列表请求 %d 次 / 书架 %d 个号(预筛免请求 %d + 无新文章 %d"
-                "%s); 窗口内候选 %d 篇; 本轮取链上限 %d 篇",
+                "%s); 窗口内候选 %d 篇; 本轮取链上限 %d 篇; 剩余预算 %.1f 单位%s",
                 processed, len(subs), dormant, unchanged,
                 (f" + 失败跳过 {len(skipped)}" if skipped else ""),
-                len(candidates), CONTENT_MAX_PER_RUN)
+                len(candidates), CONTENT_MAX_PER_RUN, budget_left,
+                ("(预算已用完, 剩余号下轮优先补)" if budget_stop else ""))
     todo_content = candidates[:CONTENT_MAX_PER_RUN] if CONTENT_MAX_PER_RUN else candidates
     deferred = len(candidates) - len(todo_content)
     if deferred > 0:
         logger.warning("本轮正文限额 %d 篇, 顺延 %d 篇到下一轮(仍在回溯窗口内, 会重新成为候选)",
                        CONTENT_MAX_PER_RUN, deferred)
     for entry in todo_content:
+        # 取链也吃配额(实测约 0.1 单位/篇), 同样受预算约束
+        if budget_left < BUDGET_COST_CONTENT:
+            logger.warning("本轮请求预算已用完(%.1f 单位) —— 取链阶段提前收手, "
+                           "剩余候选未进 seen, 下轮仍在窗口内会自动补上", LIST_BUDGET)
+            budget_stop = True
+            break
+        budget_left -= BUDGET_COST_CONTENT
         _maybe_keepalive()   # 取链阶段同样可能拖长
         if not _consume_one(entry, reader_url, seen, articles):
             # 不当场丢弃: 保留条目与位置, 轮末统一重试(见下方轮末重试)
