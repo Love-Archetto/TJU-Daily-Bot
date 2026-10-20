@@ -1007,13 +1007,21 @@ def main() -> int:
         f.write(final_report)
     logger.info("Report written: %s", output_filename)
 
+    # 8.4 询问是否生成"附加产物"(summary 汇总 + 综测简报)。
+    #     主日报是必须产物, 一定写; 这两样是可选的, 用第二个账号跑"只抓不分析"时跳过。
+    #     非交互环境不会阻塞, 默认生成(与改造前行为一致)。
+    gen_extras = _ask_generate_extras()
+
     # 8.5 综测相关文章简报: 与主日报同一份输入, 单独落 output/综测/。
     #     放在主报告之后、state 落盘之前: 它要读 new_articles 的摘要(第 6 步已写回),
     #     而失败不应该连累主流程 —— 综测文件是"附加视图", 主日报才是必须产物。
-    try:
-        write_eval_report(new_articles, profile)
-    except Exception as e:
-        logger.warning("综测简报生成失败(不影响主日报): %s", e)
+    if gen_extras:
+        try:
+            write_eval_report(new_articles, profile)
+        except Exception as e:
+            logger.warning("综测简报生成失败(不影响主日报): %s", e)
+    else:
+        logger.info("按用户选择跳过综测简报")
 
     # 9. 更新状态
     for a in new_articles:
@@ -1031,7 +1039,8 @@ def main() -> int:
 
     # 11. 收尾: 汇总 -> save -> 提交推送(汇总必须在推送之前, 否则它只能等下一轮捎带)
     #     日期用窗口日, 与 _maybe_daily_summary 划的"天"是同一把尺。
-    rc = _finalize_and_push(state, is_ci, f"daily report {today_window}")
+    rc = _finalize_and_push(state, is_ci, f"daily report {today_window}",
+                            gen_summary=gen_extras)
     if rc != 0:
         return rc
 
@@ -1039,7 +1048,42 @@ def main() -> int:
     return 0
 
 
-def _finalize_and_push(state: dict, is_ci: bool, message: str) -> int:
+def _ask_generate_extras() -> bool:
+    """询问是否生成本日的 summary 与综测简报。
+
+    用途: "只抓不分析"的第二账号跑批(比如 25 个高价值号), 不需要 summary/综测,
+    跳过能省掉一轮 AI 调用; 而主账号照常生成。
+
+    优先级: 环境变量 GENERATE_EXTRAS(1/0) > 交互式询问 > 非交互默认生成(保持原行为)。
+    非交互(CI/管道/后台作业)不阻塞, 一律按生成处理, 与改造前一致。
+    """
+    env = os.environ.get("GENERATE_EXTRAS", "").strip().lower()
+    if env in ("0", "false", "no", "n", "off"):
+        logger.info("GENERATE_EXTRAS=%s -> 本日跳过 summary 与综测简报", env)
+        return False
+    if env in ("1", "true", "yes", "y", "on"):
+        return True
+    try:
+        if not sys.stdin.isatty():
+            return True   # 非交互环境: 保持原行为
+    except Exception:
+        return True
+    try:
+        print("")
+        print("=" * 56)
+        print("  主日报已生成。")
+        print("  是否还要生成本日的【summary 汇总】和【综测简报】?")
+        print("=" * 56)
+        ans = input("生成本日 summary 与综测? [Y=生成 / N=跳过]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return True
+    ok = ans not in ("n", "no", "否", "不")
+    logger.info("用户选择: %s summary 与综测", "生成" if ok else "跳过")
+    return ok
+
+
+def _finalize_and_push(state: dict, is_ci: bool, message: str,
+                       gen_summary: bool = True) -> int:
     """收尾: 生成当天汇总 -> 落盘 state -> (CI 下)提交推送并校验远端.
 
     _maybe_daily_summary 会新建 output/summary/*.md 并写 state["last_summary_date"],
@@ -1049,7 +1093,10 @@ def _finalize_and_push(state: dict, is_ci: bool, message: str) -> int:
         0 = 无需推送(非 CI) 或推送并已确认远端前进;
         2 = 报告已落盘但没同步到远端(数据仍在本地, 补一次 push 即可)。
     """
-    _maybe_daily_summary(state)
+    if gen_summary:
+        _maybe_daily_summary(state)
+    else:
+        logger.info("按用户选择跳过每日 summary 汇总")
     save_state(state)
 
     if not is_ci:
