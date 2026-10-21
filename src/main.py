@@ -349,6 +349,21 @@ def _ai_rank_and_summarize(
     return part1, part2, part3
 
 
+def _link_md(link: str | None, text: str = "查看原文") -> str:
+    """把 URL 渲染成 [查看原文](URL)。
+
+    报告里直接显示完整链接([https://mp.weixin.qq.com/s?__biz=...](同一个))会把版面撑爆,
+    长链接在多数 Markdown 渲染器里还会折行、难读。换成短文本 + 超链接后 URL 仍完整
+    保留在 target 里, 点击与复制都不受影响。
+
+    空链接/占位符返回 —, 避免产出 [查看原文](#) 这种点不开的假链接。
+    """
+    url = (link or "").strip()
+    if not url or url == "#":
+        return "—"
+    return f"[{text}]({url})"
+
+
 def generate_report(
     part1: list[dict],
     part2: list[dict],
@@ -375,7 +390,7 @@ def generate_report(
         for i, article in enumerate(part1, 1):
             lines.append(f"### {i}. {article.get('title', '无标题')}")
             lines.append(f"- **来源**: {article.get('source', '未知')}")
-            lines.append(f"- **链接**: [{article.get('link', '#')}]({article.get('link', '#')})")
+            lines.append(f"- **链接**: {_link_md(article.get('link'))}")
             if article.get("image"):
                 lines.append(f"![封面]({article['image']})")
             if article.get("publish_time"):
@@ -398,7 +413,7 @@ def generate_report(
         for i, article in enumerate(part2, 1):
             lines.append(f"### {i}. {article.get('title', '无标题')}")
             lines.append(f"- **来源**: {article.get('source', '未知')}")
-            lines.append(f"- **链接**: [{article.get('link', '#')}]({article.get('link', '#')})")
+            lines.append(f"- **链接**: {_link_md(article.get('link'))}")
             if article.get("image"):
                 lines.append(f"![封面]({article['image']})")
             if article.get("publish_time"):
@@ -421,7 +436,7 @@ def generate_report(
         # Part 3 的定位是"快速扫一眼有哪些没被选中的信息", 所以刻意**不渲染封面图**:
         # 每条都带一张图会把篇幅撑爆, 反而失去速览的意义。摘要是文字, 保留。
         for i, article in enumerate(part3, 1):
-            lines.append(f"{i}. **{article.get('title', '无标题')}** — [{article.get('link', '#')}]({article.get('link', '#')})")
+            lines.append(f"{i}. **{article.get('title', '无标题')}** — {_link_md(article.get('link'))}")
             lines.append(f"   - 来源: {article.get('source', '未知')} | 时间: {article.get('publish_time', '未知')}")
             if article.get("summary"):
                 lines.append(f"   - 摘要: {article['summary']}")
@@ -535,8 +550,7 @@ def _append_article(lines: list[str], idx: int, article: dict, hits: list[str]) 
     """在综测简报中追加一条文章的 Markdown 段落."""
     lines.append(f"### {idx}. {article.get('title', '无标题')}")
     lines.append(f"- **来源**: {article.get('source', '未知')}")
-    link = article.get("link", "#")
-    lines.append(f"- **链接**: [{link}]({link})")
+    lines.append(f"- **链接**: {_link_md(article.get('link'))}")
     if article.get("image"):
         lines.append(f"![封面]({article['image']})")
     if article.get("publish_time"):
