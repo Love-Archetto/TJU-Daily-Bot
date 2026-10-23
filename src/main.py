@@ -1064,15 +1064,25 @@ def main() -> int:
     return 0
 
 
-def _ask_generate_extras() -> bool:
-    """询问是否生成本日的 summary 与综测简报。
+# _ask_generate_extras() 在开头交互时置位: 用户答 Y 即视为"要重新生成",
+# 让 _finalize_and_push 忽略 last_summary_date 幂等标记(等价于 FORCE_SUMMARY=1)。
+# 这样用户在开头敲一个 Y 就够了, 不必再记第二个环境变量。
+_force_summary_by_user = False
 
-    用途: "只抓不分析"的第二账号跑批(比如 25 个高价值号), 不需要 summary/综测,
+
+def _ask_generate_extras() -> bool:
+    """在流程开头询问是否生成本日的 summary 与综测简报。
+
+    用途: "只抓不分析"的第二账号跑批(比如 30 个高价值号), 不需要 summary/综测,
     跳过能省掉一轮 AI 调用; 而主账号照常生成。
 
     优先级: 环境变量 GENERATE_EXTRAS(1/0) > 交互式询问 > 非交互默认生成(保持原行为)。
     非交互(CI/管道/后台作业)不阻塞, 一律按生成处理, 与改造前一致。
+
+    交互答 Y 时会额外置位 _force_summary_by_user: 当天已生成过也强制重做,
+    省得用户再去找 FORCE_SUMMARY 这个变量。答 N 只管"要不要生成", 不强制。
     """
+    global _force_summary_by_user
     env = os.environ.get("GENERATE_EXTRAS", "").strip().lower()
     if env in ("0", "false", "no", "n", "off"):
         logger.info("GENERATE_EXTRAS=%s -> 本日跳过 summary 与综测简报", env)
@@ -1086,15 +1096,19 @@ def _ask_generate_extras() -> bool:
         return True
     try:
         print("")
-        print("=" * 56)
-        print("  主日报已生成。")
-        print("  是否还要生成本日的【summary 汇总】和【综测简报】?")
-        print("=" * 56)
-        ans = input("生成本日 summary 与综测? [Y=生成 / N=跳过]: ").strip().lower()
+        print("=" * 60)
+        print("  是否生成本日的【summary 汇总】和【综测简报】?")
+        print("  （当天已生成过也会重新生成; 主日报无论如何都会生成）")
+        print("=" * 60)
+        ans = input("生成 summary 与综测? [Y=生成(强制重做) / N=跳过]: ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         return True
     ok = ans not in ("n", "no", "否", "不")
-    logger.info("用户选择: %s summary 与综测", "生成" if ok else "跳过")
+    if ok:
+        _force_summary_by_user = True
+        logger.info("用户选择生成 -> 本轮强制重新生成 summary 汇总")
+    else:
+        logger.info("用户选择跳过 summary 与综测")
     return ok
 
 
@@ -1110,7 +1124,9 @@ def _finalize_and_push(state: dict, is_ci: bool, message: str,
         2 = 报告已落盘但没同步到远端(数据仍在本地, 补一次 push 即可)。
     """
     if gen_summary:
-        _maybe_daily_summary(state, force=os.environ.get("FORCE_SUMMARY", "") == "1")
+        force_summary = (os.environ.get("FORCE_SUMMARY", "") == "1"
+                         or _force_summary_by_user)   # 开头答 Y 也算强制重做
+        _maybe_daily_summary(state, force=force_summary)
     else:
         logger.info("按用户选择跳过每日 summary 汇总")
     save_state(state)
