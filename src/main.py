@@ -1167,7 +1167,9 @@ def _maybe_daily_summary(state: dict, force: bool = False) -> str | None:
     if force and state.get("last_summary_date") == today:
         logger.info("FORCE_SUMMARY=1 -> 忽略幂等标记, 重新生成当日汇总")
     try:
-        summary_path = build_daily_summary(state)
+        # force 时把"当天全收"一起传下去: 只绕过幂等标记还不够, 增量窗口也得关掉,
+        # 否则当天早些时候生成的报告聚合不进来。
+        summary_path = build_daily_summary(state, force_all=force)
         logger.info("每日汇总已生成: %s", summary_path)
         if summary_path and os.path.exists(summary_path):
             with open(summary_path, "r", encoding="utf-8") as f:
@@ -1235,12 +1237,17 @@ def _prune_inactive_gzh(inactive: list[dict], sources: list[dict]) -> int:
     return added
 
 
-def build_daily_summary(state: dict) -> str | None:
-    """把自上次当天总结(若无则全部)以来的所有短时总结, 其 Part1/2/3 完整内容
-    移动聚合为当天总结。各 Part 内部按短时总结时间先后排序。
+def build_daily_summary(state: dict, force_all: bool = False) -> str | None:
+    """把当天所有短时总结的 Part1/2/3 完整内容聚合为当天总结。
+
+    各 Part 内部按短时总结时间先后排序。
 
     Args:
-        state: 含 last_summary_time(上次当天总结的 ISO 时间, 窗口基准)
+        state: 含 last_summary_time(上次当天总结的 ISO 时间, 增量窗口基准)
+        force_all: True 时忽略增量窗口, **收录当天全部短时报告**。
+            用户在开头答 Y 表示"重新生成今天的汇总"时走这条路 —— 否则只聚合
+            last_summary_time 之后的部分, 早先那几份会被漏掉(2026-10-23 实测:
+            当天有 13:13:30 与 13:56:33 两份报告, 汇总里只剩后者)。
 
     Returns:
         当天总结文件路径, 或 None(无可聚合内容)
@@ -1275,8 +1282,13 @@ def build_daily_summary(state: dict) -> str | None:
         dt = f"{ts[0]} {ts[1]}:{ts[2]}:{ts[3]}"
         reports.append({"file": fn, "dt": dt, "content": content})
 
-    # 过滤窗口: dt > 上次当天总结时间
-    if base_ts:
+    # 过滤窗口:
+    #   force_all -> 只保留"当天"的短时报告, 不设时间下界(当天全收)
+    #   否则     -> 只保留 dt > 上次当天总结时间 的增量部分
+    if force_all:
+        reports = [r for r in reports if r["dt"].startswith(today)]
+        logger.info("强制重做: 收录当天全部短时报告 %d 份", len(reports))
+    elif base_ts:
         try:
             base_dt = datetime.fromisoformat(base_ts)
             reports = [r for r in reports if _parse_dt(r["dt"]) > base_dt]
