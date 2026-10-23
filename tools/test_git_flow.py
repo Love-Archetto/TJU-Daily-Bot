@@ -523,7 +523,9 @@ def scenario_i() -> None:
     order = []
     sent_alerts = []
 
-    def fake_summary(state):
+    def fake_summary(state, force=False):
+        # force 是 _maybe_daily_summary 新增的形参(FORCE_SUMMARY=1 强制重生成),
+        # 夹具必须跟着接受, 否则 _finalize_and_push 传 force= 时会 TypeError。
         order.append("summary")
         return None
 
@@ -605,7 +607,7 @@ def scenario_j() -> None:
     saved = m._maybe_daily_summary
     saved_state_path = m.STATE_PATH
 
-    def fake_summary(state):
+    def fake_summary(state, force=False):
         write(os.path.join(_work, rel), f"# summary {today}\n")
         return os.path.join(_work, rel)
 

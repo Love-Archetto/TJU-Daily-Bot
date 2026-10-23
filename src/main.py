@@ -902,6 +902,13 @@ def main() -> int:
     state["last_daily_date"] = today_window
     save_state(state)
 
+    # 1.8 先问清楚本轮要不要"附加产物"(summary 汇总 + 综测简报)。
+    #     放在抓取之前而不是报告之后: 一开始就问完, 跑到最后不再停下来等输入,
+    #     长任务(几十分钟)期间人可以先走开。
+    #     主日报是必须产物, 一定写; 这两样可选, 第二账号"只抓不分析"时跳过省一轮 AI。
+    #     非交互环境不阻塞, 默认生成(与改造前行为一致)。
+    gen_extras = _ask_generate_extras()
+
     # 2. 加载信源，抓取网站 + 公众号（公众号经 we-mp-rss 拉 RSS）
     sources = load_sources()
     all_articles = []
@@ -1021,11 +1028,6 @@ def main() -> int:
         f.write(final_report)
     logger.info("Report written: %s", output_filename)
 
-    # 8.4 询问是否生成"附加产物"(summary 汇总 + 综测简报)。
-    #     主日报是必须产物, 一定写; 这两样是可选的, 用第二个账号跑"只抓不分析"时跳过。
-    #     非交互环境不会阻塞, 默认生成(与改造前行为一致)。
-    gen_extras = _ask_generate_extras()
-
     # 8.5 综测相关文章简报: 与主日报同一份输入, 单独落 output/综测/。
     #     放在主报告之后、state 落盘之前: 它要读 new_articles 的摘要(第 6 步已写回),
     #     而失败不应该连累主流程 —— 综测文件是"附加视图", 主日报才是必须产物。
@@ -1108,7 +1110,7 @@ def _finalize_and_push(state: dict, is_ci: bool, message: str,
         2 = 报告已落盘但没同步到远端(数据仍在本地, 补一次 push 即可)。
     """
     if gen_summary:
-        _maybe_daily_summary(state)
+        _maybe_daily_summary(state, force=os.environ.get("FORCE_SUMMARY", "") == "1")
     else:
         logger.info("按用户选择跳过每日 summary 汇总")
     save_state(state)
@@ -1131,16 +1133,23 @@ def _finalize_and_push(state: dict, is_ci: bool, message: str,
     return 2
 
 
-def _maybe_daily_summary(state: dict) -> str | None:
+def _maybe_daily_summary(state: dict, force: bool = False) -> str | None:
     """若当天(北京 4:00~次日4:00 窗口)总结尚未生成, 则生成当日汇总并邮件发送.
 
     一天一次调度下, 当天首次跑即生成总结。幂等: 当天已生成过则跳过。
+
+    Args:
+        force: True 时忽略 last_summary_date 幂等标记, 强制重新生成并覆盖当日汇总。
+               用于"当天已经生成过、但内容不满意想重做"的场景(FORCE_SUMMARY=1)。
+
     Returns: 汇总文件路径, 或 None(当天已生成 / 失败)。
     """
     today = _daily_window_date()
-    if state.get("last_summary_date") == today:
-        logger.info("当天总结已生成过(%s), 跳过", today)
+    if state.get("last_summary_date") == today and not force:
+        logger.info("当天总结已生成过(%s), 跳过(要重做请设 FORCE_SUMMARY=1)", today)
         return None
+    if force and state.get("last_summary_date") == today:
+        logger.info("FORCE_SUMMARY=1 -> 忽略幂等标记, 重新生成当日汇总")
     try:
         summary_path = build_daily_summary(state)
         logger.info("每日汇总已生成: %s", summary_path)
